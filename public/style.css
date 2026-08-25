@@ -189,44 +189,129 @@ html, body {
   gap: 10px;
 }
 
-/* Quality control */
-.quality-control {
+/* Quality control - gear button + dropdown */
+.quality-control-wrapper {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 6px;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 4px 8px 4px 4px;
 }
 
-.quality-label {
-  font-size: 1rem;
-  cursor: default;
+.quality-gear-btn {
+  padding: 8px 10px;
+  min-width: 40px;
+  justify-content: center;
+}
+
+.quality-dropdown {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px;
+  box-shadow: var(--shadow);
+  z-index: 100;
+  min-width: 280px;
+  animation: dropdownFade 0.15s ease-out;
+}
+
+@keyframes dropdownFade {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.quality-dropdown.hidden {
+  display: none;
 }
 
 .quality-select {
   appearance: none;
-  background: transparent;
-  border: none;
+  width: 100%;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
   color: var(--text-primary);
   font-size: .8rem;
   font-weight: 500;
   cursor: pointer;
-  padding: 2px 28px 2px 0;
-  min-width: 180px;
+  padding: 10px 12px;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23a0a0a0' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
   background-repeat: no-repeat;
-  background-position: right 4px center;
+  background-position: right 10px center;
+  padding-right: 32px;
 }
 
 .quality-select:focus {
   outline: none;
+  border-color: var(--accent);
 }
 
 .quality-select option {
   background: var(--bg-secondary);
   color: var(--text-primary);
+  padding: 8px;
+}
+
+/* Pre-sharing quality modal */
+.quality-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.8);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  animation: fadeIn 0.2s ease-out;
+}
+
+.quality-modal-overlay.hidden {
+  display: none;
+}
+
+.quality-modal {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 28px 32px;
+  width: 100%;
+  max-width: 420px;
+  text-align: center;
+  box-shadow: var(--shadow);
+  animation: slideUp 0.25s ease-out;
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.quality-modal h2 {
+  font-size: 1.3rem;
+  margin-bottom: 8px;
+}
+
+.quality-modal p {
+  color: var(--text-secondary);
+  font-size: .9rem;
+  margin-bottom: 24px;
+}
+
+.quality-modal .quality-select {
+  width: 100%;
+  margin-bottom: 20px;
+  text-align: left;
+}
+
+.quality-modal .btn-action {
+  width: 100%;
+  justify-content: center;
 }
 
 /* Buttons */

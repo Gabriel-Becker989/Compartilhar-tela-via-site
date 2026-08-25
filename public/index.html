@@ -39,23 +39,28 @@
         <span id="participant-count" class="badge">0 online</span>
       </div>
       <div class="topbar-right">
-        <div class="quality-control" id="quality-control" title="Qualidade da Transmissão">
-          <label for="quality-select" class="quality-label">🎬</label>
-          <select id="quality-select" class="quality-select">
-            <option value="1080p60">1080p 60 FPS — Alto Upload / Alta Qualidade</option>
-            <option value="1080p30">1080p 30 FPS — Upload Médio</option>
-            <option value="720p60" selected>720p 60 FPS — Recomendado p/ Jogos (Upload Moderado)</option>
-            <option value="720p30">720p 30 FPS — Conexões Estáveis</option>
-            <option value="480p60">480p 60 FPS — Redes Oscilantes/Lentas</option>
-            <option value="480p30">480p 30 FPS — Consumo Mínimo</option>
-          </select>
-        </div>
         <button id="btn-share" class="btn-action btn-green" title="Compartilhar Tela">
           <span class="btn-icon">📺</span> Compartilhar Tela
         </button>
         <button id="btn-stop" class="btn-action btn-red hidden" title="Parar Compartilhamento">
           <span class="btn-icon">⏹️</span> Parar
         </button>
+        <!-- Quality selector gear button (only visible when sharing) -->
+        <div id="quality-control-wrapper" class="quality-control-wrapper hidden">
+          <button id="btn-quality" class="btn-action btn-neutral quality-gear-btn" title="Qualidade da Transmissão" aria-label="Qualidade">
+            <span class="btn-icon">⚙️</span>
+          </button>
+          <div id="quality-dropdown" class="quality-dropdown hidden">
+            <select id="quality-select" class="quality-select">
+              <option value="1080p60">1080p 60 FPS — Alto Upload / Alta Qualidade</option>
+              <option value="1080p30">1080p 30 FPS — Upload Médio</option>
+              <option value="720p60" selected>720p 60 FPS — Recomendado p/ Jogos (Upload Moderado)</option>
+              <option value="720p30">720p 30 FPS — Conexões Estáveis</option>
+              <option value="480p60">480p 60 FPS — Redes Oscilantes/Lentas</option>
+              <option value="480p30">480p 30 FPS — Consumo Mínimo</option>
+            </select>
+          </div>
+        </div>
         <button id="btn-toggle-sidebar" class="btn-action btn-neutral" title="Participantes">
           <span class="btn-icon">👥</span>
         </button>

@@ -20,6 +20,9 @@ const sidebar       = document.getElementById('sidebar');
 const partList      = document.getElementById('participants-list');
 const partCount     = document.getElementById('participant-count');
 const qualitySelect = document.getElementById('quality-select');
+const btnQuality    = document.getElementById('btn-quality');
+const qualityDropdown = document.getElementById('quality-dropdown');
+const qualityWrapper = document.getElementById('quality-control-wrapper');
 
 // ─── Default avatar (simple SVG data URL) ──────────────────
 const DEFAULT_AVATAR = 'data:image/svg+xml;utf8,' + encodeURIComponent(
@@ -173,21 +176,114 @@ function showLoginError(msg) {
    ===================================================================== */
 
 /**
- * Inicializa o seletor de qualidade na UI.
- * Restaura o último preset salvo no localStorage (se houver).
+ * Inicializa o controle de qualidade:
+ * - Restaura preset salvo no localStorage
+ * - Configura dropdown do botão de engrenagem (durante stream)
+ * - Configura modal de seleção inicial (antes de iniciar stream)
  */
 function initQualityControl() {
+  // 1. Restaura preset salvo
   const saved = localStorage.getItem('screenShareQuality');
   if (saved && QUALITY_PRESETS[saved]) {
     currentQuality = saved;
     qualitySelect.value = saved;
   }
 
+  // 2. Dropdown do botão de engrenagem (durante stream)
+  btnQuality.addEventListener('click', (e) => {
+    e.stopPropagation();
+    qualityDropdown.classList.toggle('hidden');
+  });
+
+  // Fecha dropdown ao clicar fora
+  document.addEventListener('click', () => {
+    qualityDropdown.classList.add('hidden');
+  });
+
+  // Impede que clique dentro do dropdown feche
+  qualityDropdown.addEventListener('click', (e) => e.stopPropagation());
+
+  // Seleção de qualidade no dropdown
   qualitySelect.addEventListener('change', async (e) => {
     const newQuality = e.target.value;
     if (QUALITY_PRESETS[newQuality]) {
       await applyQualitySettings(newQuality);
+      qualityDropdown.classList.add('hidden');
     }
+  });
+
+  // 3. Modal de seleção inicial (antes de iniciar stream)
+  // O modal é criado dinamicamente em showQualityModal()
+}
+
+/**
+ * Mostra modal para selecionar qualidade ANTES de iniciar o compartilhamento.
+ * Retorna Promise que resolve com a qualidade escolhida.
+ */
+function showQualityModal() {
+  return new Promise((resolve) => {
+    // Cria overlay do modal
+    const overlay = document.createElement('div');
+    overlay.className = 'quality-modal-overlay';
+    overlay.innerHTML = `
+      <div class="quality-modal">
+        <h2>⚙️ Qualidade da Transmissão</h2>
+        <p>Escolha a resolução e framerate para seu compartilhamento de tela</p>
+        <select id="modal-quality-select" class="quality-select">
+          <option value="1080p60">1080p 60 FPS — Alto Upload / Alta Qualidade</option>
+          <option value="1080p30">1080p 30 FPS — Upload Médio</option>
+          <option value="720p60" selected>720p 60 FPS — Recomendado p/ Jogos (Upload Moderado)</option>
+          <option value="720p30">720p 30 FPS — Conexões Estáveis</option>
+          <option value="480p60">480p 60 FPS — Redes Oscilantes/Lentas</option>
+          <option value="480p30">480p 30 FPS — Consumo Mínimo</option>
+        </select>
+        <button id="modal-quality-confirm" class="btn-action btn-green">Iniciar Compartilhamento</button>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+
+    // Foca no select
+    const modalSelect = overlay.querySelector('#modal-quality-select');
+    modalSelect.value = currentQuality;
+    modalSelect.focus();
+
+    // Confirma seleção
+    const confirmBtn = overlay.querySelector('#modal-quality-confirm');
+    const cleanup = () => {
+      overlay.remove();
+      document.removeEventListener('keydown', onKeydown);
+    };
+
+    const onConfirm = () => {
+      const selected = modalSelect.value;
+      currentQuality = selected;
+      localStorage.setItem('screenShareQuality', selected);
+      qualitySelect.value = selected; // sincroniza dropdown
+      cleanup();
+      resolve(selected);
+    };
+
+    confirmBtn.addEventListener('click', onConfirm);
+    modalSelect.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') onConfirm();
+    });
+
+    // ESC para cancelar
+    const onKeydown = (e) => {
+      if (e.key === 'Escape') {
+        cleanup();
+        resolve(null); // usuário cancelou
+      }
+    };
+    document.addEventListener('keydown', onKeydown);
+
+    // Click no overlay para cancelar
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) {
+        cleanup();
+        resolve(null);
+      }
+    });
   });
 }
 
@@ -604,10 +700,17 @@ btnShare.addEventListener('click', startSharing);
 btnStop.addEventListener('click', stopSharing);
 
 /**
- * Inicia o compartilhamento de tela com o preset de qualidade atual.
- * Usa getDisplayMedia com constraints baseadas no preset selecionado.
+ * Inicia o compartilhamento de tela.
+ * Primeiro mostra modal para selecionar qualidade, depois inicia getDisplayMedia.
  */
 async function startSharing() {
+  // Mostra modal de seleção de qualidade ANTES de iniciar
+  const selectedQuality = await showQualityModal();
+  if (!selectedQuality) {
+    // Usuário cancelou (ESC ou click fora)
+    return;
+  }
+
   const preset = QUALITY_PRESETS[currentQuality];
 
   try {
@@ -649,6 +752,9 @@ async function startSharing() {
   btnShare.classList.add('hidden');
   btnStop.classList.remove('hidden');
 
+  // Mostra botão de engrenagem para mudar qualidade durante stream
+  qualityWrapper.classList.remove('hidden');
+
   // Mark myself as sharing
   const me = participants.get(myId);
   if (me) me.sharing = true;
@@ -675,6 +781,10 @@ function stopSharing() {
 
   btnStop.classList.add('hidden');
   btnShare.classList.remove('hidden');
+
+  // Esconde botão de engrenagem
+  qualityWrapper.classList.add('hidden');
+  qualityDropdown.classList.add('hidden');
 
   // Remove local preview
   removeVideoTile(myId);
@@ -903,6 +1013,6 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
-  return str.replace(/"/g, '"');
+function escapeAttr(str) {
   return str.replace(/"/g, '"');
 }
