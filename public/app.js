@@ -1,5 +1,5 @@
 /* =====================================================================
-   Screen Share Collab — Frontend (Vanilla JS + WebRTC + Socket.io)
+   Screen Share Collab — Frontend (LiveKit Cloud SDK)
    ===================================================================== */
 
 // ─── DOM refs ──────────────────────────────────────────────
@@ -8,7 +8,8 @@ const roomScreen    = document.getElementById('room-screen');
 const avatarInput   = document.getElementById('avatar-input');
 const avatarPreview = document.getElementById('avatar-preview');
 const nicknameInput = document.getElementById('nickname-input');
-const passwordInput = document.getElementById('password-input');
+const roomInput     = document.getElementById('room-input'); // Novo: input de nome da sala
+const nameInput     = document.getElementById('name-input'); // Novo: input de nome do participante
 const joinBtn       = document.getElementById('join-btn');
 const loginError    = document.getElementById('login-error');
 const btnShare      = document.getElementById('btn-share');
@@ -19,12 +20,18 @@ const emptyState    = document.getElementById('empty-state');
 const sidebar       = document.getElementById('sidebar');
 const partList      = document.getElementById('participants-list');
 const partCount     = document.getElementById('participant-count');
-const qualitySelect = document.getElementById('quality-select');
-const btnQuality    = document.getElementById('btn-quality');
-const qualityDropdown = document.getElementById('quality-dropdown');
-const qualityWrapper = document.getElementById('quality-control-wrapper');
+const remoteVideo   = document.getElementById('remoteVideo'); // Novo: vídeo remoto
 
-// ─── Default avatar (simple SVG data URL) ──────────────────
+// ─── Estado da LiveKit ─────────────────────────────────────
+let livekitUrl   = '';        // URL do servidor LiveKit (wss://...)
+let accessToken  = '';        // JWT token
+let myRoomName   = '';        // Nome da sala atual
+let myParticipantName = '';   // Nome do participante atual
+let myRoom       = null;      // Instância da Room do LiveKit
+
+// Peer connections & related data - removidas; usando LiveKit SDK ao invés disso
+
+// ─── Default avatar ──────────────────────────────────────────
 const DEFAULT_AVATAR = 'data:image/svg+xml;utf8,' + encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">' +
   '<rect width="100" height="100" fill="%235865f2"/>' +
@@ -34,137 +41,193 @@ const DEFAULT_AVATAR = 'data:image/svg+xml;utf8,' + encodeURIComponent(
 
 avatarPreview.src = DEFAULT_AVATAR;
 
-// ─── State ─────────────────────────────────────────────────
-const socket = io();
-
-let myId       = null;
-let myNickname = '';
-let myAvatar   = DEFAULT_AVATAR;
-let isSharing  = false;
-let localStream = null;
-let videoTrack = null; // Referência ao video track para applyConstraints
-
-// Peer connections & related data
-const outPeers = new Map(); // peerId -> { pc, iceQueue, senders: Map<trackId, sender> }
-const inPeers = new Map();  // peerId -> { pc, iceQueue, nickname, avatar }
-
-// Active video tiles: peerId -> HTMLElement
-const videoTiles = new Map();
-
-// Participant map: peerId -> { nickname, avatar, sharing }
-const participants = new Map();
-
-// ─── Quality Presets Configuration ─────────────────────────
-/**
- * Presets de qualidade para transmissão de tela.
- * Cada preset define resolução, framerate e bitrate máximo.
- * degradationPreference='maintain-resolution' prioriza nitidez em oscilações de rede.
- */
-const QUALITY_PRESETS = {
-  '1080p60': { width: 1920, height: 1080, frameRate: 60, maxBitrate: 6000000, label: '1080p 60 FPS' },
-  '1080p30': { width: 1920, height: 1080, frameRate: 30, maxBitrate: 4000000, label: '1080p 30 FPS' },
-  '720p60':  { width: 1280, height: 720,  frameRate: 60, maxBitrate: 3500000, label: '720p 60 FPS' },
-  '720p30':  { width: 1280, height: 720,  frameRate: 30, maxBitrate: 2000000, label: '720p 30 FPS' },
-  '480p60':  { width: 854,  height: 480,  frameRate: 60, maxBitrate: 1500000, label: '480p 60 FPS' },
-  '480p30':  { width: 854,  height: 480,  frameRate: 30, maxBitrate: 800000,  label: '480p 30 FPS' }
-};
-
-// Preset atual (default: 720p60)
-let currentQuality = '720p60';
-
-// Detecta Firefox para ajustes específicos
-const isFirefox = navigator.userAgent.toLowerCase().includes('firefox');
-
-// ICE config (public STUN + TURN for NAT traversal)
-const ICE_CONFIG = {
-  iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    {
-      urls: 'turn:openrelay.metered.ca:80',
-      username: 'openrelayproject',
-      credential: 'openrelayproject'
-    },
-    {
-      urls: 'turn:openrelay.metered.ca:443',
-      username: 'openrelayproject',
-      credential: 'openrelayproject'
-    },
-    {
-      urls: 'turn:openrelay.metered.ca:443?transport=tcp',
-      username: 'openrelayproject',
-      credential: 'openrelayproject'
-    }
-  ]
-};
-
 /* =====================================================================
-   1. LOGIN
+   1. LOGIN / JOIN SCREEN
    ===================================================================== */
 
-// Avatar preview
-avatarInput.addEventListener('change', (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = () => {
-    myAvatar = reader.result;
-    avatarPreview.src = myAvatar;
-  };
-  reader.readAsDataURL(file);
-});
+joinBtn.addEventListener('click', async () => {
+  const roomName = roomInput.value.trim() || 'sala-principal';
+  const participantName = nameInput.value.trim();
 
-// Join button
-joinBtn.addEventListener('click', () => {
-  const nickname = nicknameInput.value.trim();
-  const password = passwordInput.value;
-
-  if (!nickname) {
-    showLoginError('Por favor, insira um nickname.');
-    return;
-  }
-  if (!password) {
-    showLoginError('Por favor, insira a senha da sala.');
+  if (!participantName) {
+    showLoginError('Por favor, insira seu nome.');
     return;
   }
 
-  joinBtn.disabled = true;
-  joinBtn.textContent = 'Entrando...';
+  myRoomName   = roomName;
+  myParticipantName = participantName;
 
-  socket.emit('auth', { password, nickname, avatar: myAvatar }, (res) => {
-    if (!res.success) {
-      showLoginError(res.message);
-      joinBtn.disabled = false;
-      joinBtn.textContent = 'Entrar na Sala';
-      return;
-    }
+  // 1. Busca JWT token via serverless function
+  try {
+    const res = await fetch(`/api/get-token?roomName=${encodeURIComponent(roomName)}&participantName=${encodeURIComponent(participantName)}`);
+    if (!res.ok) throw new Error('Erro ao obter token');
+    const data = await res.json();
+    accessToken = data.token;
+    livekitUrl  = data.url;
+  } catch (err) {
+    console.error('[login] Erro ao buscar token:', err);
+    showLoginError('Não foi possível conectar ao servidor. Tente novamente.');
+    return;
+  }
 
-    myId = res.userId;
-    myNickname = nickname;
+  // 2. Instancia e conecta na Room do LiveKit
+  try {
+    const room = new LivekitClient.Room();
+    myRoom = room;
 
-    // Populate participants list
-    for (const p of res.participants) {
-      participants.set(p.id, {
-        nickname: p.nickname,
-        avatar: p.avatar || DEFAULT_AVATAR,
-        sharing: p.sharing
-      });
-    }
+    await room.connect(livekitUrl, accessToken, {
+      // optional: você pode adicionar tracks aqui ou deixe o host compartilhar
+    });
 
-    // Switch screens
+    // Eventos da room
+    room.on('participantConnected', (participant) => {
+      console.log('[room] Participante conectado:', participant.identity);
+      updateParticipantsUI();
+    });
+
+    room.on('participantDisconnected', (participant) => {
+      console.log('[room] Participante desconectado:', participant.identity);
+      removeParticipantUI(participant.identity);
+    });
+
+    room.on('trackSubscribed', (track, participant) => {
+      // Apenas vídeo: anexa ao elemento <video>
+      if (track.kind === 'video') {
+        remoteVideo.srcObject = track;
+        remoteVideo.playsInline = true;
+        remoteVideo.muted = true; // evita feedback/echo
+        remoteVideo.play().catch(() => console.warn('[track] autoplay bloqueado'));
+      }
+    });
+
+    room.on('trackPublished', (track, participant) => {
+      console.log('[room] Track published por', participant.identity, 'kind:', track.kind);
+    });
+
+    room.on('connectionStateChanged', (state) => {
+      console.log('[room] Connection state:', state);
+      if (state === 'disconnected' || state === 'failed') {
+        showLoginError('Conexão perdida. Recarregue a página para tentar novamente.');
+        disconnectRoom();
+      }
+    });
+
+    room.on('error', (error) => {
+      console.error('[room] Erro:', error);
+    });
+
+    // 3. Mostra tela da room, esconde login
     loginScreen.classList.remove('active');
     roomScreen.classList.add('active');
-    updateParticipantsUI();
-  });
+    updateRoomUI(roomName);
+
+    // 4. Habilita compartilhamento de tela (apenas para o próprio participante)
+    // Isso pedirá ao navegador para solicitar screen sharing
+    room.localParticipant.setScreenShareEnabled(true).then((track) => {
+      console.log('[screen-share] Share enabled, track added to local room');
+      // O track de screen share já será publicado automaticamente
+    }).catch((err) => {
+      console.error('[screen-share] Erro ao habilitar share:', err);
+      showLoginError('Não foi possível iniciar o compartilhamento de tela. Verifique permissões.');
+    });
+
+  } catch (err) {
+    console.error('[login] Erro inesperado:', err);
+    showLoginError('Erro inesperado ao conectar na sala.');
+  }
 });
 
-// Also allow Enter to join
-passwordInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') joinBtn.click();
+/* =====================================================================
+   2. SHARE / STOP
+   ===================================================================== */
+
+btnShare.addEventListener('click', () => {
+  // O share já foi habilitado no connect(); se necessário, pode re-aplicar
+  if (myRoom) {
+    myRoom.localParticipant.setScreenShareEnabled(true);
+  }
 });
-nicknameInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') passwordInput.focus();
+
+btnStop.addEventListener('click', () => {
+  if (myRoom) {
+    myRoom.localParticipant.setScreenShareEnabled(false);
+    myRoom.disconnect();
+  }
 });
+
+/* =====================================================================
+   3. DESCONEXÃO
+   ===================================================================== */
+
+function disconnectRoom() {
+  if (myRoom) {
+    myRoom.disconnect();
+    myRoom = null;
+  }
+  loginScreen.classList.add('active');
+  roomScreen.classList.remove('active');
+  updateParticipantsUI();
+  emptyState.classList.remove('hidden');
+}
+
+/* =====================================================================
+   4. QUALITY CONTROL (Engrenagem dropdown)
+   ===================================================================== */
+
+// Durante o shared, o host pode mudar o preset via dropdown
+btnQuality.addEventListener('click', (e) => {
+  e.stopPropagation();
+  qualityDropdown.classList.toggle('hidden');
+});
+
+document.addEventListener('click', () => {
+  qualityDropdown.classList.add('hidden');
+});
+
+qualityDropdown.addEventListener('click', (e) => e.stopPropagation());
+
+qualitySelect.addEventListener('change', async (e) => {
+  const qualityKey = e.target.value;
+  // Nota: no LiveKit Cloud, as constraints de bitrate/resolução são
+  // definidas no momento da captura (getUserMedia/setConstraints).
+  // O host já selecionou a qualidade antes de iniciar o share.
+  // Aqui apenas atualizamos o display; a mudança real requer reiniciar o share.
+  qualityDropdown.classList.add('hidden');
+});
+
+/* =====================================================================
+   5. PARTICIPANTES UI
+   ===================================================================== */
+
+function updateParticipantsUI() {
+  partList.innerHTML = '';
+  let count = 0;
+
+  // Conta participantes conectados na room
+  if (myRoom) {
+    const participants = myRoom.participants;
+    for (const [id, participant] of participants) {
+      count++;
+      const li = document.createElement('li');
+      li.textContent = participant.displayName || participant.identity;
+      const status = document.createElement('span');
+      status.className = 'participant-status';
+      status.textContent = participant.isConnected ? 'online' : 'offline';
+      li.appendChild(status);
+      partList.appendChild(li);
+    }
+  }
+
+  partCount.textContent = `${count} online`;
+}
+
+function updateRoomUI(roomName) {
+  roomNameBadge.textContent = roomName;
+}
+
+/* =====================================================================
+   6. UTILITIES
+   ===================================================================== */
 
 function showLoginError(msg) {
   loginError.textContent = msg;
@@ -172,839 +235,13 @@ function showLoginError(msg) {
 }
 
 /* =====================================================================
-   2. QUALITY CONTROL (UI + Constraints)
+   7. INITIALIZATION
    ===================================================================== */
 
-/**
- * Inicializa o controle de qualidade:
- * - Restaura preset salvo no localStorage
- * - Configura dropdown do botão de engrenagem (durante stream)
- * - Configura modal de seleção inicial (antes de iniciar stream)
- */
-function initQualityControl() {
-  // 1. Restaura preset salvo
-  const saved = localStorage.getItem('screenShareQuality');
-  if (saved && QUALITY_PRESETS[saved]) {
-    currentQuality = saved;
-    qualitySelect.value = saved;
-  }
-
-  // 2. Dropdown do botão de engrenagem (durante stream)
-  btnQuality.addEventListener('click', (e) => {
-    e.stopPropagation();
-    qualityDropdown.classList.toggle('hidden');
-  });
-
-  // Fecha dropdown ao clicar fora
-  document.addEventListener('click', () => {
-    qualityDropdown.classList.add('hidden');
-  });
-
-  // Impede que clique dentro do dropdown feche
-  qualityDropdown.addEventListener('click', (e) => e.stopPropagation());
-
-  // Seleção de qualidade no dropdown
-  qualitySelect.addEventListener('change', async (e) => {
-    const newQuality = e.target.value;
-    if (QUALITY_PRESETS[newQuality]) {
-      await applyQualitySettings(newQuality);
-      qualityDropdown.classList.add('hidden');
-    }
-  });
-
-  // 3. Modal de seleção inicial (antes de iniciar stream)
-  // O modal é criado dinamicamente em showQualityModal()
-}
-
-/**
- * Mostra modal para selecionar qualidade ANTES de iniciar o compartilhamento.
- * Retorna Promise que resolve com a qualidade escolhida.
- */
-function showQualityModal() {
-  return new Promise((resolve) => {
-    // Cria overlay do modal
-    const overlay = document.createElement('div');
-    overlay.className = 'quality-modal-overlay';
-    overlay.innerHTML = `
-      <div class="quality-modal">
-        <h2>⚙️ Qualidade da Transmissão</h2>
-        <p>Escolha a resolução e framerate para seu compartilhamento de tela</p>
-        <select id="modal-quality-select" class="quality-select">
-          <option value="1080p60">1080p 60 FPS — Alto Upload / Alta Qualidade</option>
-          <option value="1080p30">1080p 30 FPS — Upload Médio</option>
-          <option value="720p60" selected>720p 60 FPS — Recomendado p/ Jogos (Upload Moderado)</option>
-          <option value="720p30">720p 30 FPS — Conexões Estáveis</option>
-          <option value="480p60">480p 60 FPS — Redes Oscilantes/Lentas</option>
-          <option value="480p30">480p 30 FPS — Consumo Mínimo</option>
-        </select>
-        <button id="modal-quality-confirm" class="btn-action btn-green">Iniciar Compartilhamento</button>
-      </div>
-    `;
-    document.body.appendChild(overlay);
-
-    // Foca no select
-    const modalSelect = overlay.querySelector('#modal-quality-select');
-    modalSelect.value = currentQuality;
-    modalSelect.focus();
-
-    // Confirma seleção
-    const confirmBtn = overlay.querySelector('#modal-quality-confirm');
-    const cleanup = () => {
-      overlay.remove();
-      document.removeEventListener('keydown', onKeydown);
-    };
-
-    const onConfirm = () => {
-      const selected = modalSelect.value;
-      currentQuality = selected;
-      localStorage.setItem('screenShareQuality', selected);
-      qualitySelect.value = selected; // sincroniza dropdown
-      cleanup();
-      resolve(selected);
-    };
-
-    confirmBtn.addEventListener('click', onConfirm);
-    modalSelect.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') onConfirm();
-    });
-
-    // ESC para cancelar
-    const onKeydown = (e) => {
-      if (e.key === 'Escape') {
-        cleanup();
-        resolve(null); // usuário cancelou
-      }
-    };
-    document.addEventListener('keydown', onKeydown);
-
-    // Click no overlay para cancelar
-    overlay.addEventListener('click', (e) => {
-      if (e.target === overlay) {
-        cleanup();
-        resolve(null);
-      }
-    });
-  });
-}
-
-/**
- * Aplica as configurações de qualidade selecionadas.
- * Se estiver compartilhando, usa applyConstraints() no track de vídeo
- * e atualiza o bitrate em todos os RTCRtpSender ativos.
- * @param {string} qualityKey - Chave do preset (ex: '720p60')
- */
-async function applyQualitySettings(qualityKey) {
-  const preset = QUALITY_PRESETS[qualityKey];
-  if (!preset) return;
-
-  currentQuality = qualityKey;
-  localStorage.setItem('screenShareQuality', qualityKey);
-
-  // Se não está compartilhando, apenas atualiza o preset para a próxima vez
-  if (!isSharing || !videoTrack) {
-    console.log('[Quality] Preset updated to:', preset.label);
-    return;
-  }
-
-  try {
-    // 1. Aplica constraints no track de vídeo (resolução + framerate)
-    // O navegador fará o melhor esforço para atender; se não suportar, ajustará automaticamente
-    await videoTrack.applyConstraints({
-      width: { ideal: preset.width },
-      height: { ideal: preset.height },
-      frameRate: { ideal: preset.frameRate }
-    });
-    console.log('[Quality] applyConstraints applied:', preset.label);
-
-    // 2. Atualiza bitrate e degradationPreference em todos os senders de vídeo ativos
-    await updateAllSendersBitrate(preset.maxBitrate);
-
-  } catch (err) {
-    console.warn('[Quality] Falha ao aplicar constraints, tentando fallback:', err);
-    // Fallback gracioso: tenta obter as capacidades reais do track
-    try {
-      const caps = videoTrack.getCapabilities();
-      const fallback = {
-        width: { ideal: Math.min(preset.width, caps.width?.max || preset.width) },
-        height: { ideal: Math.min(preset.height, caps.height?.max || preset.height) },
-        frameRate: { ideal: Math.min(preset.frameRate, caps.frameRate?.max || preset.frameRate) }
-      };
-      await videoTrack.applyConstraints(fallback);
-      await updateAllSendersBitrate(preset.maxBitrate);
-      console.log('[Quality] Fallback applied:', fallback);
-    } catch (fallbackErr) {
-      console.error('[Quality] Fallback também falhou:', fallbackErr);
-    }
-  }
-}
-
-/**
- * Atualiza maxBitrate e degradationPreference em todos os RTCRtpSender de vídeo
- * de todas as conexões outPeers ativas.
- * @param {number} maxBitrate - Bitrate máximo em bps
- */
-async function updateAllSendersBitrate(maxBitrate) {
-  for (const [peerId, peerData] of outPeers) {
-    if (!peerData.pc) continue;
-
-    const senders = peerData.pc.getSenders();
-    for (const sender of senders) {
-      if (sender.track && sender.track.kind === 'video') {
-        try {
-          const params = sender.getParameters();
-          if (!params.encodings) params.encodings = [{}];
-          
-          // Configura bitrate máximo
-          params.encodings[0].maxBitrate = maxBitrate;
-          
-          // Prioriza manter resolução em oscilações de rede
-          params.degradationPreference = 'maintain-resolution';
-          
-          await sender.setParameters(params);
-          console.log(`[Bitrate] Updated for peer ${peerId}: ${maxBitrate} bps`);
-        } catch (err) {
-          console.warn(`[Bitrate] Failed to set parameters for peer ${peerId}:`, err);
-        }
-      }
-    }
-  }
-}
+// O init é feito no click do #joinBtn; não precisa de chamado extra.
 
 /* =====================================================================
-   3. SOCKET EVENTS
-   ===================================================================== */
-
-socket.on('user-joined', ({ id, nickname, avatar, sharing }) => {
-  participants.set(id, {
-    nickname,
-    avatar: avatar || DEFAULT_AVATAR,
-    sharing: sharing || false
-  });
-  updateParticipantsUI();
-});
-
-socket.on('user-left', ({ id }) => {
-  participants.delete(id);
-  removeInPeer(id);
-  removeOutPeer(id);
-  removeVideoTile(id);
-  updateParticipantsUI();
-  updateGridLayout();
-});
-
-socket.on('user-start-sharing', ({ id, nickname, avatar }) => {
-  const p = participants.get(id);
-  if (p) p.sharing = true;
-  updateParticipantsUI();
-});
-
-socket.on('user-stop-sharing', ({ id }) => {
-  const p = participants.get(id);
-  if (p) p.sharing = false;
-  removeInPeer(id);
-  removeVideoTile(id);
-  updateParticipantsUI();
-  updateGridLayout();
-});
-
-socket.on('request-stream', ({ from }) => {
-  if (isSharing && localStream && !outPeers.has(from)) {
-    createPeerAndOffer(from);
-  }
-});
-
-socket.on('stop-watching', ({ from }) => {
-  removeOutPeer(from);
-});
-
-// ─── WebRTC Signaling ──────────────────────────────────────
-
-socket.on('offer', async ({ from, offer, nickname, avatar }) => {
-  try {
-    if (!inPeers.has(from)) {
-      console.log('Ignoring offer from ' + from + ' because we are not watching.');
-      return;
-    }
-
-    const pc = createPeerConnection(from, false); // false = receiver (inPeer)
-    const peerData = inPeers.get(from);
-    peerData.pc = pc;
-    peerData.nickname = nickname;
-    peerData.avatar = avatar;
-
-    pc.onicecandidate = (e) => {
-      if (e.candidate) {
-        socket.emit('ice-candidate', { from: myId, to: from, candidate: e.candidate });
-      }
-    };
-
-    pc.ontrack = (e) => {
-      const p = participants.get(from);
-      const nick = nickname || p?.nickname || 'Desconhecido';
-      const av = avatar || p?.avatar || DEFAULT_AVATAR;
-
-      const stream = e.streams[0];
-      if (!stream) return;
-
-      if (!videoTiles.has(from)) {
-        addVideoTile(from, stream, nick, av);
-      } else {
-        const tile = videoTiles.get(from);
-        const video = tile.querySelector('video');
-        if (video && video.srcObject !== stream) {
-          video.srcObject = stream;
-          video.muted = false;
-          video.play().catch(err => console.warn(err));
-        }
-      }
-    };
-
-    pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed' || pc.connectionState === 'closed') {
-        removeInPeer(from);
-        removeVideoTile(from);
-      }
-    };
-
-    await pc.setRemoteDescription(new RTCSessionDescription(offer));
-    
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-
-    socket.emit('answer', { to: from, answer, senderId: from });
-
-    if (peerData.iceQueue && peerData.iceQueue.length > 0) {
-      for (const c of peerData.iceQueue) {
-        try { await pc.addIceCandidate(new RTCIceCandidate(c)); } catch(e){}
-      }
-      peerData.iceQueue = [];
-    }
-  } catch (err) {
-    console.error('Error handling offer', err);
-  }
-});
-
-socket.on('answer', async ({ from, answer, senderId }) => {
-  try {
-    if (senderId === myId) {
-      const peerData = outPeers.get(from);
-      if (peerData && peerData.pc) {
-        await peerData.pc.setRemoteDescription(new RTCSessionDescription(answer));
-        if (peerData.iceQueue && peerData.iceQueue.length > 0) {
-          for (const c of peerData.iceQueue) {
-            try { await peerData.pc.addIceCandidate(new RTCIceCandidate(c)); } catch(e){}
-          }
-          peerData.iceQueue = [];
-        }
-      }
-    }
-  } catch (err) {
-    console.error('Error handling answer', err);
-  }
-});
-
-socket.on('ice-candidate', async ({ from, to, candidate, senderId }) => {
-    try {
-      // ICE candidate from remote peer to me (I'm the receiver - inPeers)
-      if (to === myId) {
-        const peerData = inPeers.get(from);
-        if (peerData) {
-          if (peerData.pc?.remoteDescription) {
-            await peerData.pc.addIceCandidate(new RTCIceCandidate(candidate));
-          } else {
-            peerData.iceQueue.push(candidate);
-          }
-        }
-      }
-      // ICE candidate from me to remote peer (I'm the sender - outPeers)
-      else if (from === myId) {
-        const peerData = outPeers.get(to);
-        if (peerData) {
-          if (peerData.pc?.remoteDescription) {
-            await peerData.pc.addIceCandidate(new RTCIceCandidate(candidate));
-          } else {
-            peerData.iceQueue.push(candidate);
-          }
-        }
-      }
-    } catch (err) {
-      console.error('Error handling ice-candidate', err);
-    }
-  });
-
-/* =====================================================================
-   4. WEBRTC - Peer Connection Factory
-   ===================================================================== */
-
-/**
- * Cria uma RTCPeerConnection com configuração de codecs preferenciais.
- * Prioriza H.264 / AV1 sobre VP8 para aceleração por hardware.
- * @param {string} peerId - ID do peer remoto
- * @param {boolean} isSender - true se somos o sender (outPeer), false se receiver (inPeer)
- * @returns {RTCPeerConnection}
- */
-function createPeerConnection(peerId, isSender) {
-  // Configuração base
-  const pcConfig = { ...ICE_CONFIG };
-  
-  // Reordena codecs para priorizar H.264 e AV1 (hardware acceleration)
-  // Isso é feito via setCodecPreferences no transceiver (quando disponível)
-  const pc = new RTCPeerConnection(pcConfig);
-
-  // Armazena referência ao peerId para debug
-  pc._peerId = peerId;
-  pc._isSender = isSender;
-
-  return pc;
-}
-
-/* =====================================================================
-   5. WEBRTC - Outgoing (Sender) - createPeerAndOffer
-   ===================================================================== */
-
-async function createPeerAndOffer(peerId) {
-  try {
-    const pc = createPeerConnection(peerId, true);
-    
-    // Armazena senders para poder atualizar bitrate depois
-    const senders = new Map();
-    outPeers.set(peerId, { pc, iceQueue: [], senders });
-
-    pc.onicecandidate = (e) => {
-      if (e.candidate) {
-        socket.emit('ice-candidate', { from: myId, to: peerId, candidate: e.candidate });
-      }
-    };
-
-    pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'connected') {
-        // Aplica bitrate inicial nos senders de vídeo
-        applyBitrateToSenders(pc, QUALITY_PRESETS[currentQuality].maxBitrate);
-      }
-      if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed' || pc.connectionState === 'closed') {
-        removeOutPeer(peerId);
-      }
-    };
-
-    // Adiciona tracks do localStream à conexão
-    if (localStream) {
-      localStream.getTracks().forEach((track) => {
-        const sender = pc.addTrack(track, localStream);
-        if (track.kind === 'video') {
-          senders.set(track.id, sender);
-        }
-      });
-    }
-
-    // Configura codec preferences para priorizar H.264/AV1 (se suportado)
-    await setCodecPreferences(pc, 'video');
-
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-
-    socket.emit('offer', {
-      to: peerId,
-      offer,
-      nickname: myNickname,
-      avatar: myAvatar
-    });
-  } catch (err) {
-    console.error('Error creating peer and offer', err);
-  }
-}
-
-/**
- * Aplica maxBitrate e degradationPreference nos senders de vídeo de uma PeerConnection.
- * @param {RTCPeerConnection} pc
- * @param {number} maxBitrate
- */
-function applyBitrateToSenders(pc, maxBitrate) {
-  const senders = pc.getSenders();
-  for (const sender of senders) {
-    if (sender.track && sender.track.kind === 'video') {
-      try {
-        const params = sender.getParameters();
-        if (!params.encodings) params.encodings = [{}];
-        params.encodings[0].maxBitrate = maxBitrate;
-        params.degradationPreference = 'maintain-resolution';
-        sender.setParameters(params).catch(err => console.warn('[Bitrate] setParameters failed:', err));
-      } catch (e) {
-        console.warn('[Bitrate] Could not set maxBitrate', e);
-      }
-    }
-  }
-}
-
-/**
- * Tenta definir codec preferences para priorizar H.264 e AV1.
- * Requer suporte a RTCRtpTransceiver.setCodecPreferences (Chrome 90+, Firefox 90+).
- * @param {RTCPeerConnection} pc
- * @param {string} kind - 'video' ou 'audio'
- */
-async function setCodecPreferences(pc, kind) {
-  try {
-    const transceivers = pc.getTransceivers();
-    for (const transceiver of transceivers) {
-      if (transceiver.receiver.track?.kind !== kind) continue;
-
-      const capabilities = RTCRtpReceiver.getCapabilities(kind);
-      if (!capabilities || !capabilities.codecs) continue;
-
-      // Ordena codecs: H.264 (RTX) > AV1 > VP9 > VP8 > outros
-      const preferredCodecs = capabilities.codecs
-        .filter(c => c.kind === kind)
-        .sort((a, b) => {
-          const getPriority = (codec) => {
-            const mime = codec.mimeType.toLowerCase();
-            if (mime.includes('h264') || mime.includes('avc')) return 4;
-            if (mime.includes('av1')) return 3;
-            if (mime.includes('vp9')) return 2;
-            if (mime.includes('vp8')) return 1;
-            return 0;
-          };
-          return getPriority(b) - getPriority(a);
-        });
-
-      if (preferredCodecs.length > 0) {
-        transceiver.setCodecPreferences(preferredCodecs);
-        console.log(`[Codec] ${kind} preferences set:`, preferredCodecs.map(c => c.mimeType).join(', '));
-      }
-    }
-  } catch (err) {
-    // setCodecPreferences pode não estar disponível em navegadores antigos
-    console.warn('[Codec] setCodecPreferences not supported or failed:', err);
-  }
-}
-
-function removeInPeer(peerId) {
-  const peerData = inPeers.get(peerId);
-  if (peerData && peerData.pc) {
-    peerData.pc.close();
-  }
-  inPeers.delete(peerId);
-}
-
-function removeOutPeer(peerId) {
-  const peerData = outPeers.get(peerId);
-  if (peerData && peerData.pc) {
-    peerData.pc.close();
-  }
-  outPeers.delete(peerId);
-}
-
-/* =====================================================================
-   6. SCREEN SHARING
-   ===================================================================== */
-
-btnShare.addEventListener('click', startSharing);
-btnStop.addEventListener('click', stopSharing);
-
-/**
- * Inicia o compartilhamento de tela.
- * Primeiro mostra modal para selecionar qualidade, depois inicia getDisplayMedia.
- */
-async function startSharing() {
-  // Mostra modal de seleção de qualidade ANTES de iniciar
-  const selectedQuality = await showQualityModal();
-  if (!selectedQuality) {
-    // Usuário cancelou (ESC ou click fora)
-    return;
-  }
-
-  const preset = QUALITY_PRESETS[currentQuality];
-
-  try {
-    // Constraints para getDisplayMedia
-    // Firefox: não suporta frameRate em getDisplayMedia, ignora
-    // Audio: echoCancellation ajuda a evitar feedback
-    const displayMediaOptions = {
-      video: {
-        cursor: 'always',
-        width: { ideal: preset.width },
-        height: { ideal: preset.height },
-        frameRate: isFirefox ? undefined : { ideal: preset.frameRate }
-      },
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true
-      }
-    };
-
-    // Remove frameRate undefined para Firefox
-    if (isFirefox) {
-      delete displayMediaOptions.video.frameRate;
-    }
-
-    localStream = await navigator.mediaDevices.getDisplayMedia(displayMediaOptions);
-    videoTrack = localStream.getVideoTracks()[0];
-
-    if (!videoTrack) {
-      throw new Error('Nenhum track de vídeo obtido');
-    }
-
-  } catch (err) {
-    console.log('Screen share cancelled or denied', err);
-    return;
-  }
-
-  isSharing = true;
-  btnShare.classList.add('hidden');
-  btnStop.classList.remove('hidden');
-
-  // Mostra botão de engrenagem para mudar qualidade durante stream
-  qualityWrapper.classList.remove('hidden');
-
-  // Mark myself as sharing
-  const me = participants.get(myId);
-  if (me) me.sharing = true;
-  updateParticipantsUI();
-
-  // Tell server
-  socket.emit('start-sharing');
-
-  // Show local preview (my own screen) — muted to avoid audio feedback
-  addVideoTile(myId, localStream, myNickname + ' (você)', myAvatar, true);
-
-  // Aplica bitrate inicial nas conexões existentes (se houver viewers já conectados)
-  await updateAllSendersBitrate(preset.maxBitrate);
-
-  // Handle user stopping share via browser controls (botão nativo do browser)
-  videoTrack.onended = () => {
-    stopSharing();
-  };
-}
-
-function stopSharing() {
-  if (!isSharing) return;
-  isSharing = false;
-
-  btnStop.classList.add('hidden');
-  btnShare.classList.remove('hidden');
-
-  // Esconde botão de engrenagem
-  qualityWrapper.classList.add('hidden');
-  qualityDropdown.classList.add('hidden');
-
-  // Remove local preview
-  removeVideoTile(myId);
-
-  // Stop local tracks e limpa event listeners
-  if (localStream) {
-    localStream.getTracks().forEach(t => {
-      t.onended = null; // Remove listener
-      t.stop();
-    });
-    localStream = null;
-  }
-  videoTrack = null;
-
-  // Close all peer connections I created as sender
-  for (const [peerId, peerData] of outPeers) {
-    if (peerData && peerData.pc) peerData.pc.close();
-  }
-  outPeers.clear();
-
-  // Mark myself as not sharing
-  const me = participants.get(myId);
-  if (me) me.sharing = false;
-  updateParticipantsUI();
-
-  // Notify server
-  socket.emit('stop-sharing');
-}
-
-/* =====================================================================
-   7. VIDEO TILES
-   ===================================================================== */
-
-function addVideoTile(peerId, stream, nickname, avatar, isLocal = false) {
-  if (videoTiles.has(peerId)) return;
-
-  emptyState.classList.add('hidden');
-
-  const tile = document.createElement('div');
-  tile.className = 'video-tile';
-  tile.dataset.peerId = peerId;
-
-  const video = document.createElement('video');
-  video.srcObject = stream;
-  video.autoplay = true;
-  video.playsInline = true;
-
-  if (isLocal) {
-    video.muted = true;
-  } else {
-    video.volume = 1;
-    video.muted = false;
-  }
-
-  const tryPlay = () => {
-    video.play().catch(() => {
-      tile.addEventListener('click', () => {
-        video.muted = false;
-        video.play().catch(console.warn);
-      }, { once: true });
-    });
-  };
-
-  if (video.readyState >= 2) {
-    tryPlay();
-  } else {
-    video.addEventListener('loadeddata', tryPlay, { once: true });
-  }
-
-  const badge = document.createElement('div');
-  badge.className = 'video-badge';
-  badge.innerHTML = `
-    <img src="${escapeAttr(avatar)}" alt="avatar" />
-    <span>Tela de ${escapeHtml(nickname)}</span>
-  `;
-
-  const volControl = document.createElement('div');
-  volControl.className = 'volume-control';
-  volControl.innerHTML = `
-    <label>🔊</label>
-    <input type="range" min="0" max="1" step="0.05" value="${isLocal ? '0' : '1'}" ${isLocal ? 'disabled' : ''} />
-  `;
-
-  const slider = volControl.querySelector('input[type="range"]');
-  slider.addEventListener('input', () => {
-    video.volume = parseFloat(slider.value);
-  });
-
-  const fullscreenBtn = document.createElement('button');
-  fullscreenBtn.className = 'fullscreen-btn';
-  fullscreenBtn.innerHTML = '⛶';
-  fullscreenBtn.title = 'Tela Cheia';
-  fullscreenBtn.onclick = () => {
-    if (!document.fullscreenElement) {
-      tile.requestFullscreen().catch(err => console.warn(err));
-    } else {
-      document.exitFullscreen();
-    }
-  };
-
-  tile.appendChild(video);
-  tile.appendChild(badge);
-  tile.appendChild(volControl);
-  tile.appendChild(fullscreenBtn);
-  videoGrid.appendChild(tile);
-  videoTiles.set(peerId, tile);
-
-  updateGridLayout();
-}
-
-function removeVideoTile(peerId) {
-  const tile = videoTiles.get(peerId);
-  if (tile) {
-    const video = tile.querySelector('video');
-    if (video) video.srcObject = null;
-    tile.remove();
-    videoTiles.delete(peerId);
-  }
-  if (videoTiles.size === 0) {
-    emptyState.classList.remove('hidden');
-  }
-  updateGridLayout();
-}
-
-function updateGridLayout() {
-  // Handled automatically by CSS grid auto-fit
-}
-
-function startWatchingStream(peerId) {
-  inPeers.set(peerId, { pc: null, iceQueue: [] });
-  socket.emit('request-stream', { to: peerId });
-  updateParticipantsUI();
-}
-
-function stopWatchingStream(peerId) {
-  socket.emit('stop-watching', { to: peerId });
-  removeInPeer(peerId);
-  removeVideoTile(peerId);
-  updateParticipantsUI();
-}
-
-/* =====================================================================
-   8. PARTICIPANTS UI
-   ===================================================================== */
-
-function updateParticipantsUI() {
-  partList.innerHTML = '';
-  let count = 0;
-
-  for (const [id, p] of participants) {
-    count++;
-    const li = document.createElement('li');
-
-    const avatarImg = document.createElement('img');
-    avatarImg.src = p.avatar;
-    avatarImg.alt = 'avatar';
-
-    const infoDiv = document.createElement('div');
-    infoDiv.className = 'participant-info';
-
-    const nameSpan = document.createElement('span');
-    nameSpan.className = 'participant-name';
-    nameSpan.textContent = p.nickname + (id === myId ? ' (você)' : '');
-
-    const statusSpan = document.createElement('span');
-    statusSpan.className = 'participant-status' + (p.sharing ? ' sharing-indicator' : '');
-    statusSpan.textContent = p.sharing ? '📺 Compartilhando' : '👁️ Assistindo';
-
-    infoDiv.appendChild(nameSpan);
-    infoDiv.appendChild(statusSpan);
-
-    // Mostra qualidade atual se for o próprio usuário e estiver compartilhando
-    if (id === myId && isSharing) {
-      const qualityBadge = document.createElement('div');
-      qualityBadge.className = 'stream-indicator-badge';
-      qualityBadge.innerHTML = `
-        <span class="stream-icon">⚡</span>
-        <span class="stream-text">${QUALITY_PRESETS[currentQuality].label}</span>
-      `;
-      infoDiv.appendChild(qualityBadge);
-    }
-
-    li.appendChild(avatarImg);
-    li.appendChild(infoDiv);
-
-    if (p.sharing && id !== myId) {
-      const isWatching = inPeers.has(id);
-      const watchBtn = document.createElement('button');
-      watchBtn.className = 'btn-watch' + (isWatching ? ' watching-active' : '');
-      watchBtn.textContent = isWatching ? 'Parar' : 'Assistir';
-      watchBtn.addEventListener('click', () => {
-        if (isWatching) {
-          stopWatchingStream(id);
-        } else {
-          startWatchingStream(id);
-        }
-      });
-      li.appendChild(watchBtn);
-    }
-
-    partList.appendChild(li);
-  }
-
-  partCount.textContent = `${count} online`;
-}
-
-// ─── Sidebar toggle ────────────────────────────────────────
-btnSidebar.addEventListener('click', () => {
-  sidebar.classList.toggle('collapsed');
-});
-
-/* =====================================================================
-   9. INITIALIZATION
-   ===================================================================== */
-
-// Inicializa controle de qualidade após DOM ready
-initQualityControl();
-
-/* =====================================================================
-   10. UTILITIES
+   8. UTILITIES (antigas)
    ===================================================================== */
 
 function escapeHtml(str) {
