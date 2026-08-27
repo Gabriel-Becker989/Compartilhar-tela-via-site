@@ -12,7 +12,9 @@
   --accent: #5865f2;
   --accent-hover: #4752c4;
   --green: #3ba55d;
+  --green-hover: #2d8049;
   --red: #ed4245;
+  --red-hover: #c03537;
   --text-primary: #ffffff;
   --text-secondary: #a0a0a0;
   --border: #2c2d32;
@@ -104,7 +106,6 @@ background: #0d0e11;
   border-color: var(--accent);
 }
 
-/* Avatar Upload Circular */
 .avatar-upload {
   display: flex;
   flex-direction: column;
@@ -224,7 +225,6 @@ align-items: center; flex: 1; padding: 20px; background: var(--bg-primary);
 
 #participants-list { list-style: none; }
 
-/* Item de Participante com o Botão Quadrado Verde */
 #participants-list li {
 display: flex;
 align-items: center;
@@ -241,12 +241,10 @@ font-size: 0.9rem;
   max-width: 170px;
 }
 
-/* Botão Quadrado Verde com Bolinha Vermelha */
+/* Botões de Transmissão (Verde / Vermelho) */
 .btn-watch-stream {
   width: 28px;
   height: 28px;
-  background-color: var(--green);
-  border: 1px solid #2d8049;
   border-radius: 6px;
   display: flex;
   align-items: center;
@@ -254,19 +252,30 @@ font-size: 0.9rem;
   cursor: pointer;
   transition: transform 0.15s, background-color 0.2s;
   flex-shrink: 0;
+  font-size: 0.85rem;
+  border: none;
 }
 
-.btn-watch-stream:hover {
+/* Estado 1: Botão Verde com Ícone de Câmera */
+.btn-watch-stream.start {
+  background-color: var(--green);
+  border: 1px solid #2d8049;
+}
+
+.btn-watch-stream.start:hover {
   transform: scale(1.1);
-  background-color: #2d8049;
+  background-color: var(--green-hover);
 }
 
-.red-dot {
-  width: 10px;
-  height: 10px;
+/* Estado 2: Botão Vermelho com Ícone de X */
+.btn-watch-stream.stop {
   background-color: var(--red);
-  border-radius: 50%;
-  box-shadow: 0 0 6px rgba(237, 66, 69, 0.8);
+  border: 1px solid #c03537;
+}
+
+.btn-watch-stream.stop:hover {
+  transform: scale(1.1);
+  background-color: var(--red-hover);
 }
 
 /* ===================== CONTROLES DE VÍDEO (OVERLAY) ===================== */
