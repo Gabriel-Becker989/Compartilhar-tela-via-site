@@ -16,8 +16,15 @@
       <h1>🖥️ Screen Share <span class="badge">LiveKit</span></h1>
       <p class="subtitle">Compartilhe sua tela via LiveKit Cloud</p>
 
-      <input type="text" id="room-input" placeholder="Nome da Sala (ex: sala-principal)" value="sala-principal" autocomplete="off" />
-      <input type="text" id="name-input" placeholder="Seu nome" maxlength="24" autocomplete="off" />
+      <input type="text" id="room-input" placeholder="Nome da Sala" value="sala-principal" autocomplete="off" />
+      <div class="avatar-upload">
+        <label for="avatar-input">
+          <img id="avatar-preview" src="data:image/svg+xml;utf8,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20100%20100'%20fill='%235865f2'%3E%3Crect%20width='100'%20height='100'%20fill='%235865f2'%3E%3Ctext%20x='50'%20y='62'%20text-anchor='middle'%20fill='white'%20font-size='42'%20font-family='sans-serif'>😊%3C/text%3E%3C/svg%3E" alt="Avatar" style="width:80px;height:80px;border-radius:50%;object-fit:cover;" />
+        </label>
+        <input type="file" id="avatar-input" accept="image/*" hidden />
+        <span class="avatar-hint">Clique para trocar foto</span>
+      </div>
+      <input type="password" id="password-input" placeholder="Senha da sala" value="ovo" autocomplete="off" />
       <button id="join-btn">Entrar na Sala</button>
       <p id="login-error" class="error-msg"></p>
     </div>
