@@ -1,6 +1,6 @@
-import { AccessToken } from 'livekit-server-sdk';
+const { AccessToken } = require('livekit-server-sdk');
 
-export default async function handler(req, res) {
+module.exports = async function handler(req, res) {
   try {
     const { roomName, participantName, password, avatar } = req.query;
 
@@ -9,16 +9,17 @@ export default async function handler(req, res) {
       return res.status(403).json({ error: 'Senha incorreta!' });
     }
 
-    // 2. Leitura das variáveis globais cadastradas na Vercel
+    // 2. Leitura das variáveis de ambiente na Vercel
     const apiKey = process.env.LIVEKIT_API_KEY;
     const apiSecret = process.env.LIVEKIT_API_SECRET;
     const wsUrl = process.env.LIVEKIT_URL;
 
     if (!apiKey || !apiSecret || !wsUrl) {
-      return res.status(500).json({ error: 'Configuração de ambiente ausente no servidor.' });
+      console.error('Chaves ausentes:', { apiKey: !!apiKey, apiSecret: !!apiSecret, wsUrl: !!wsUrl });
+      return res.status(500).json({ error: 'Variáveis de ambiente ausentes no servidor.' });
     }
 
-    // 3. Montagem do Token JWT com o avatar no Metadata
+    // 3. Geração do token JWT
     const at = new AccessToken(apiKey, apiSecret, {
       identity: participantName || `usuario-${Math.floor(Math.random() * 1000)}`,
                                metadata: JSON.stringify({ avatar: avatar || '' })
@@ -36,7 +37,7 @@ export default async function handler(req, res) {
 
     return res.status(200).json({ token, url: wsUrl });
   } catch (error) {
-    console.error('Erro na API Serverless:', error);
-    return res.status(500).json({ error: 'Falha ao processar o token.' });
+    console.error('Erro interno na função:', error);
+    return res.status(500).json({ error: 'Erro interno na geração do token.' });
   }
-}
+};
