@@ -7,7 +7,6 @@ const loginScreen   = document.getElementById('login-screen');
 const roomScreen    = document.getElementById('room-screen');
 const avatarInput   = document.getElementById('avatar-input');
 const avatarPreview = document.getElementById('avatar-preview');
-const roomInput     = document.getElementById('room-input');
 const nameInput     = document.getElementById('name-input');
 const passwordInput = document.getElementById('password-input');
 const joinBtn       = document.getElementById('join-btn');
@@ -19,20 +18,21 @@ const partList      = document.getElementById('participants-list');
 const partCount     = document.getElementById('participant-count');
 const remoteVideo   = document.getElementById('remoteVideo');
 const emptyState    = document.getElementById('empty-state');
-const roomNameBadge = document.getElementById('room-name-badge');
 
-// ─── Estado do LiveKit ─────────────────────────────────────
 let myRoom = null;
 
-// Avatar Padrão
+// Avatar com Ícone de Tubarão 🦈
 const DEFAULT_AVATAR = 'data:image/svg+xml;utf8,' + encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">' +
   '<rect width="100" height="100" fill="%235865f2"/>' +
-  '<text x="50" y="62" text-anchor="middle" fill="white" font-size="42" font-family="sans-serif">😊</text>' +
+  '<text x="50" y="65" text-anchor="middle" fill="white" font-size="50" font-family="sans-serif">🦈</text>' +
   '</svg>'
 );
 
-// Preview dinâmico de troca de foto
+if (avatarPreview) {
+  avatarPreview.src = DEFAULT_AVATAR;
+}
+
 if (avatarInput) {
   avatarInput.addEventListener('change', (e) => {
     const file = e.target.files[0];
@@ -49,7 +49,7 @@ if (avatarInput) {
 // ─── Login e Entrada na Sala ──────────────────────────────
 if (joinBtn) {
   joinBtn.addEventListener('click', async () => {
-    const roomName = roomInput ? roomInput.value.trim() : 'sala-principal';
+    const roomName = 'sala-principal'; // Fixo como padrão
     const participantName = nameInput ? nameInput.value.trim() : '';
     const password = passwordInput ? passwordInput.value.trim() : '';
     const avatarFile = avatarInput && avatarInput.files ? avatarInput.files[0] : null;
@@ -77,15 +77,13 @@ if (joinBtn) {
     }
   });
 }
+
 async function iniciarLogin(roomName, participantName, password, avatarDataUrl) {
   try {
     const res = await fetch(`/api/get-token?roomName=${encodeURIComponent(roomName)}&participantName=${encodeURIComponent(participantName)}&password=${encodeURIComponent(password)}&avatar=${encodeURIComponent(avatarDataUrl)}`);
 
-    // Verifica se a resposta do servidor não é OK ou se retornou HTML de erro
     const contentType = res.headers.get("content-type");
     if (!res.ok || !contentType || !contentType.includes("application/json")) {
-      const textError = await res.text();
-      console.error('[login] Resposta do servidor não-JSON:', textError);
       throw new Error('Falha no servidor. Verifique as chaves no painel da Vercel.');
     }
 
@@ -118,7 +116,6 @@ async function iniciarLogin(roomName, participantName, password, avatarDataUrl) 
 
     if (loginScreen) loginScreen.classList.remove('active');
     if (roomScreen) roomScreen.classList.add('active');
-    if (roomNameBadge) roomNameBadge.textContent = roomName;
 
     updateParticipantsUI();
 
@@ -166,21 +163,32 @@ function disconnectRoom() {
   if (roomScreen) roomScreen.classList.remove('active');
 }
 
+// ─── Atualização da Lista de Participantes (Inclui Você) ─────
 function updateParticipantsUI() {
-  if (!partList) return;
+  if (!partList || !myRoom) return;
   partList.innerHTML = '';
-  let count = 0;
 
-  if (myRoom && myRoom.remoteParticipants) {
-    count = myRoom.remoteParticipants.size + 1;
+  let totalOnline = 0;
+
+  // 1. Adiciona o participante local (Você)
+  if (myRoom.localParticipant) {
+    totalOnline++;
+    const li = document.createElement('li');
+    li.textContent = `${myRoom.localParticipant.identity} (Você)`;
+    partList.appendChild(li);
+  }
+
+  // 2. Adiciona participantes remotos
+  if (myRoom.remoteParticipants) {
     myRoom.remoteParticipants.forEach((participant) => {
+      totalOnline++;
       const li = document.createElement('li');
       li.textContent = participant.identity;
       partList.appendChild(li);
     });
   }
 
-  if (partCount) partCount.textContent = `${count} online`;
+  if (partCount) partCount.textContent = `${totalOnline} online`;
 }
 
 function showLoginError(msg) {

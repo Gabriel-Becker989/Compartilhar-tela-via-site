@@ -5,7 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Screen Share — LiveKit Cloud</title>
   <link rel="stylesheet" href="style.css" />
-  <!-- LiveKit Client SDK via CDN -->
   <script src="https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.min.js"></script>
 </head>
 <body>
@@ -20,12 +19,10 @@
       </div>
       <p class="subtitle">Compartilhe sua tela via LiveKit Cloud</p>
 
-      <input type="text" id="room-input" placeholder="Nome da Sala" value="sala-principal" autocomplete="off" />
-
-      <!-- Upload do Avatar Redondo -->
+      <!-- Upload do Avatar com Ícone de Tubarão -->
       <div class="avatar-upload">
         <label for="avatar-input" class="avatar-label">
-          <img id="avatar-preview" src="data:image/svg+xml;utf8,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20100%20100'%20fill='%235865f2'%3E%3Crect%20width='100'%20height='100'%20fill='%235865f2'%3E%3Ctext%20x='50'%20y='62'%20text-anchor='middle'%20fill='white'%20font-size='42'%20font-family='sans-serif'%3E😊%3C/text%3E%3C/svg%3E" alt="Avatar" />
+          <img id="avatar-preview" src="data:image/svg+xml;utf8,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20100%20100'%20fill='%235865f2'%3E%3Crect%20width='100'%20height='100'%20fill='%235865f2'%3E%3Ctext%20x='50'%20y='65'%20text-anchor='middle'%20fill='white'%20font-size='50'%20font-family='sans-serif'%3E🦈%3C/text%3E%3C/svg%3E" alt="Avatar" />
         </label>
         <input type="file" id="avatar-input" accept="image/*" hidden />
         <span class="avatar-hint">Clique para trocar foto</span>
@@ -44,7 +41,7 @@
     <header id="topbar">
       <div class="topbar-left">
         <span class="logo">🖥️ Screen Share</span>
-        <span id="room-name-badge" class="badge"></span>
+        <span id="room-name-badge" class="badge">sala-principal</span>
         <span id="participant-count" class="badge">0 online</span>
       </div>
       <div class="topbar-right">
