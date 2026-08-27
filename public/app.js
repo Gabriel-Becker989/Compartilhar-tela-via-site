@@ -19,13 +19,14 @@ const remoteVideo   = document.getElementById('remoteVideo');
 const videoWrapper  = document.getElementById('video-wrapper');
 const emptyState    = document.getElementById('empty-state');
 
-// Novos elementos de controle
+// Elementos de controle
 const qualitySelect = document.getElementById('quality-select');
 const btnFullscreen = document.getElementById('btn-fullscreen');
 const btnMute       = document.getElementById('btn-mute');
 const volumeSlider  = document.getElementById('volume-slider');
 
 let myRoom = null;
+let currentWatchingPublication = null;
 
 const DEFAULT_AVATAR = 'data:image/svg+xml;utf8,' + encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">' +
@@ -79,25 +80,38 @@ async function iniciarLogin(roomName, participantName, password, avatarDataUrl) 
     const res = await fetch(`/api/get-token?roomName=${encodeURIComponent(roomName)}&participantName=${encodeURIComponent(participantName)}&password=${encodeURIComponent(password)}&avatar=${encodeURIComponent(avatarDataUrl)}`);
     const { token, url } = await res.json();
 
-    const room = new LivekitClient.Room();
+    // Desativa a assinatura automática de vídeo/áudio para permitir clicar e assistir
+    const room = new LivekitClient.Room({
+      autoSubscribe: false,
+    });
     myRoom = room;
 
+    // Quando o usuário clica para assistir, anexa o vídeo/áudio
     room.on(LivekitClient.RoomEvent.TrackSubscribed, (track) => {
       if (track.kind === LivekitClient.Track.Kind.Video && remoteVideo) {
         track.attach(remoteVideo);
         if (videoWrapper) videoWrapper.classList.remove('hidden');
         if (emptyState) emptyState.classList.add('hidden');
       }
+      if (track.kind === LivekitClient.Track.Kind.Audio && remoteVideo) {
+        track.attach(remoteVideo);
+        remoteVideo.muted = false;
+      }
     });
 
     room.on(LivekitClient.RoomEvent.TrackUnsubscribed, (track) => {
       if (remoteVideo) {
         track.detach(remoteVideo);
-        if (videoWrapper) videoWrapper.classList.add('hidden');
-        if (emptyState) emptyState.classList.remove('hidden');
+        if (track.kind === LivekitClient.Track.Kind.Video) {
+          if (videoWrapper) videoWrapper.classList.add('hidden');
+          if (emptyState) emptyState.classList.remove('hidden');
+        }
       }
     });
 
+    // Detecta quando alguém começa/para de compartilhar para atualizar o botão na lista
+    room.on(LivekitClient.RoomEvent.TrackPublished, () => updateParticipantsUI());
+    room.on(LivekitClient.RoomEvent.TrackUnpublished, () => updateParticipantsUI());
     room.on(LivekitClient.RoomEvent.ParticipantConnected, () => updateParticipantsUI());
     room.on(LivekitClient.RoomEvent.ParticipantDisconnected, () => updateParticipantsUI());
     room.on(LivekitClient.RoomEvent.Disconnected, () => disconnectRoom());
@@ -135,7 +149,11 @@ if (btnShare) {
         const resolution = getQualityPresets(qualityKey);
 
         await myRoom.localParticipant.setScreenShareEnabled(true, {
-          audio: true,
+          audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+          },
           resolution: resolution,
         });
 
@@ -197,23 +215,74 @@ function disconnectRoom() {
   if (roomScreen) roomScreen.classList.remove('active');
 }
 
+// ─── Lista de Participantes e Botão Quadrado Verde ─────────────
 function updateParticipantsUI() {
   if (!partList || !myRoom) return;
   partList.innerHTML = '';
   let totalOnline = 0;
 
+  // 1. Participante Local (Você)
   if (myRoom.localParticipant) {
     totalOnline++;
     const li = document.createElement('li');
-    li.textContent = `${myRoom.localParticipant.identity} (Você)`;
+
+    const nameSpan = document.createElement('span');
+    nameSpan.className = 'participant-name-text';
+    nameSpan.textContent = `${myRoom.localParticipant.identity} (Você)`;
+    li.appendChild(nameSpan);
+
     partList.appendChild(li);
   }
 
+  // 2. Participantes Remotos
   if (myRoom.remoteParticipants) {
     myRoom.remoteParticipants.forEach((participant) => {
       totalOnline++;
       const li = document.createElement('li');
-      li.textContent = participant.identity;
+
+      const nameSpan = document.createElement('span');
+      nameSpan.className = 'participant-name-text';
+      nameSpan.textContent = participant.identity;
+      li.appendChild(nameSpan);
+
+      // Verifica se o participante está compartilhando vídeo (screen_share)
+      let screenTrackPublication = null;
+      participant.videoTrackPublications.forEach((pub) => {
+        if (pub.source === LivekitClient.Track.Source.ScreenShare || pub.trackName === 'screen') {
+          screenTrackPublication = pub;
+        }
+      });
+
+      // Se o usuário estiver transmitindo, exibe o quadrado verde com a bolinha vermelha
+      if (screenTrackPublication) {
+        const watchBtn = document.createElement('button');
+        watchBtn.className = 'btn-watch-stream';
+        watchBtn.title = 'Clique para assistir a transmissão';
+
+        const redDot = document.createElement('div');
+        redDot.className = 'red-dot';
+        watchBtn.appendChild(redDot);
+
+        // Ação ao clicar no quadrado verde
+        watchBtn.addEventListener('click', () => {
+          // Se já estiver assistindo a outra pessoa, cancela a assinatura anterior
+          if (currentWatchingPublication && currentWatchingPublication !== screenTrackPublication) {
+            currentWatchingPublication.setSubscribed(false);
+          }
+
+          // Assina a transmissão do participante clicado
+          screenTrackPublication.setSubscribed(true);
+          currentWatchingPublication = screenTrackPublication;
+
+          // Assina também a faixa de áudio se ela existir
+          participant.audioTrackPublications.forEach((audioPub) => {
+            audioPub.setSubscribed(true);
+          });
+        });
+
+        li.appendChild(watchBtn);
+      }
+
       partList.appendChild(li);
     });
   }

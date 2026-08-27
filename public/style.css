@@ -221,8 +221,53 @@ align-items: center; flex: 1; padding: 20px; background: var(--bg-primary);
   border-left: 1px solid var(--border); padding: 20px;
 }
 .sidebar h3 { font-size: 0.9rem; color: var(--text-secondary); margin-bottom: 12px; text-transform: uppercase; }
+
 #participants-list { list-style: none; }
-#participants-list li { padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 0.9rem; }
+
+/* Item de Participante com o Botão Quadrado Verde */
+#participants-list li {
+display: flex;
+align-items: center;
+justify-content: space-between;
+padding: 10px 0;
+border-bottom: 1px solid var(--border);
+font-size: 0.9rem;
+}
+
+.participant-name-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 170px;
+}
+
+/* Botão Quadrado Verde com Bolinha Vermelha */
+.btn-watch-stream {
+  width: 28px;
+  height: 28px;
+  background-color: var(--green);
+  border: 1px solid #2d8049;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: transform 0.15s, background-color 0.2s;
+  flex-shrink: 0;
+}
+
+.btn-watch-stream:hover {
+  transform: scale(1.1);
+  background-color: #2d8049;
+}
+
+.red-dot {
+  width: 10px;
+  height: 10px;
+  background-color: var(--red);
+  border-radius: 50%;
+  box-shadow: 0 0 6px rgba(237, 66, 69, 0.8);
+}
 
 /* ===================== CONTROLES DE VÍDEO (OVERLAY) ===================== */
 .video-wrapper {
