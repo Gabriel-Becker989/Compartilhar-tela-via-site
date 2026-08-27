@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Screen Share — LiveKit Cloud</title>
   <link rel="stylesheet" href="style.css" />
-  <!-- LiveKit Client SDK via CDN (UMD global: LivekitClient) -->
+  <!-- LiveKit Client SDK via CDN -->
   <script src="https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.min.js"></script>
 </head>
 <body>
@@ -13,18 +13,27 @@
   <!-- ====== LOGIN / JOIN SCREEN ====== -->
   <div id="login-screen" class="screen active">
     <div class="login-card">
-      <h1>🖥️ Screen Share <span class="badge">LiveKit</span></h1>
+      <div class="header-title">
+        <span class="icon">🖥️</span>
+        <h1>Screen Share</h1>
+        <span class="badge-livekit">LiveKit</span>
+      </div>
       <p class="subtitle">Compartilhe sua tela via LiveKit Cloud</p>
 
       <input type="text" id="room-input" placeholder="Nome da Sala" value="sala-principal" autocomplete="off" />
+
+      <!-- Upload do Avatar Redondo -->
       <div class="avatar-upload">
-        <label for="avatar-input">
-          <img id="avatar-preview" src="data:image/svg+xml;utf8,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20100%20100'%20fill='%235865f2'%3E%3Crect%20width='100'%20height='100'%20fill='%235865f2'%3E%3Ctext%20x='50'%20y='62'%20text-anchor='middle'%20fill='white'%20font-size='42'%20font-family='sans-serif'>😊%3C/text%3E%3C/svg%3E" alt="Avatar" style="width:80px;height:80px;border-radius:50%;object-fit:cover;" />
+        <label for="avatar-input" class="avatar-label">
+          <img id="avatar-preview" src="data:image/svg+xml;utf8,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20100%20100'%20fill='%235865f2'%3E%3Crect%20width='100'%20height='100'%20fill='%235865f2'%3E%3Ctext%20x='50'%20y='62'%20text-anchor='middle'%20fill='white'%20font-size='42'%20font-family='sans-serif'%3E😊%3C/text%3E%3C/svg%3E" alt="Avatar" />
         </label>
         <input type="file" id="avatar-input" accept="image/*" hidden />
         <span class="avatar-hint">Clique para trocar foto</span>
       </div>
+
+      <input type="text" id="name-input" placeholder="Seu nome do usuário" autocomplete="off" />
       <input type="password" id="password-input" placeholder="Senha da sala" value="ovo" autocomplete="off" />
+
       <button id="join-btn">Entrar na Sala</button>
       <p id="login-error" class="error-msg"></p>
     </div>
@@ -39,29 +48,12 @@
         <span id="participant-count" class="badge">0 online</span>
       </div>
       <div class="topbar-right">
-        <!-- Botão de compartilhar tela (Host) -->
-        <button id="btn-share" class="btn-action btn-green" title="Compartilhar Tela" disabled>
+        <button id="btn-share" class="btn-action btn-green" title="Compartilhar Tela">
           <span class="btn-icon">📺</span> Compartilhar Tela
         </button>
         <button id="btn-stop" class="btn-action btn-red hidden" title="Parar Compartilhamento">
           <span class="btn-icon">⏹️</span> Parar
         </button>
-        <!-- Seletor de qualidade (apenas durante share) -->
-        <div id="quality-control-wrapper" class="quality-control-wrapper hidden">
-          <button id="btn-quality" class="btn-action btn-neutral quality-gear-btn" title="Qualidade da Transmissão" aria-label="Qualidade">
-            <span class="btn-icon">⚙️</span>
-          </button>
-          <div id="quality-dropdown" class="quality-dropdown hidden">
-            <select id="quality-select" class="quality-select">
-              <option value="1080p60">1080p 60 FPS — Alta Qualidade</option>
-              <option value="1080p30">1080p 30 FPS — Upload Médio</option>
-              <option value="720p60" selected>720p 60 FPS — Recomendado</option>
-              <option value="720p30">720p 30 FPS — Conexões Estáveis</option>
-              <option value="480p60">480p 60 FPS — Redes Lentas</option>
-              <option value="480p30">480p 30 FPS — Consumo Mínimo</option>
-            </select>
-          </div>
-        </div>
         <button id="btn-leave" class="btn-action btn-neutral" title="Sair da Sala">
           <span class="btn-icon">🚪</span> Sair
         </button>
@@ -69,16 +61,15 @@
     </header>
 
     <main id="main-content">
-      <!-- Video grid area -->
       <div id="video-grid">
         <div id="empty-state" class="empty-state">
           <div class="empty-icon">📡</div>
           <p>Ninguém está compartilhando a tela ainda.</p>
           <p class="small">Clique em <strong>"Compartilhar Tela"</strong> para começar!</p>
         </div>
+        <video id="remoteVideo" autoplay playsinline muted class="hidden"></video>
       </div>
 
-      <!-- Participants sidebar -->
       <aside id="sidebar" class="sidebar">
         <h3>Participantes</h3>
         <ul id="participants-list"></ul>

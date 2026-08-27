@@ -11,21 +11,20 @@ const roomInput     = document.getElementById('room-input');
 const nameInput     = document.getElementById('name-input');
 const passwordInput = document.getElementById('password-input');
 const joinBtn       = document.getElementById('join-btn');
+const btnLeave      = document.getElementById('btn-leave');
 const loginError    = document.getElementById('login-error');
 const btnShare      = document.getElementById('btn-share');
 const btnStop       = document.getElementById('btn-stop');
 const partList      = document.getElementById('participants-list');
 const partCount     = document.getElementById('participant-count');
 const remoteVideo   = document.getElementById('remoteVideo');
+const emptyState    = document.getElementById('empty-state');
+const roomNameBadge = document.getElementById('room-name-badge');
 
 // ─── Estado do LiveKit ─────────────────────────────────────
-let livekitUrl        = '';
-let accessToken       = '';
-let myRoomName        = '';
-let myParticipantName = '';
-let myRoom            = null;
+let myRoom = null;
 
-// ─── Default avatar ──────────────────────────────────────────
+// Avatar Padrão
 const DEFAULT_AVATAR = 'data:image/svg+xml;utf8,' + encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">' +
   '<rect width="100" height="100" fill="%235865f2"/>' +
@@ -33,124 +32,110 @@ const DEFAULT_AVATAR = 'data:image/svg+xml;utf8,' + encodeURIComponent(
   '</svg>'
 );
 
-if (avatarPreview) {
-  avatarPreview.src = DEFAULT_AVATAR;
+// Preview dinâmico de troca de foto
+if (avatarInput) {
+  avatarInput.addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (file && avatarPreview) {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        avatarPreview.src = event.target.result;
+      };
+      reader.readAsDataURL(file);
+    }
+  });
 }
 
-/* =====================================================================
- *  1. LOGIN / JOIN SCREEN
- *  ===================================================================== */
+// ─── Login e Entrada na Sala ──────────────────────────────
+if (joinBtn) {
+  joinBtn.addEventListener('click', async () => {
+    const roomName = roomInput ? roomInput.value.trim() : 'sala-principal';
+    const participantName = nameInput ? nameInput.value.trim() : '';
+    const password = passwordInput ? passwordInput.value.trim() : '';
+    const avatarFile = avatarInput && avatarInput.files ? avatarInput.files[0] : null;
 
-joinBtn.addEventListener('click', async () => {
-  const roomName = roomInput ? roomInput.value.trim() : 'sala-principal';
-  const participantName = nameInput ? nameInput.value.trim() : '';
-  const password = passwordInput ? passwordInput.value.trim() : '';
-  const avatarFile = avatarInput && avatarInput.files ? avatarInput.files[0] : null;
+    if (!participantName) {
+      showLoginError('Por favor, insira seu nome de usuário.');
+      return;
+    }
 
-  // Validações
-  if (!participantName) {
-    showLoginError('Por favor, insira seu nome.');
-    return;
-  }
-  if (password !== 'ovo') {
-    showLoginError('Senha incorreta! A senha da sala é sempre "ovo".');
-    return;
-  }
+    if (password !== 'ovo') {
+      showLoginError('Senha incorreta! A senha é "ovo".');
+      return;
+    }
 
-  let avatarDataUrl = '';
-  if (avatarFile) {
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      avatarDataUrl = e.target.result;
-      if (avatarPreview) avatarPreview.src = avatarDataUrl;
-      iniciarLogin(roomName, participantName, password, avatarDataUrl);
-    };
-    reader.readAsDataURL(avatarFile);
-  } else {
-    if (avatarPreview) avatarPreview.src = DEFAULT_AVATAR;
-    iniciarLogin(roomName, participantName, password, '');
-  }
-});
+    let avatarDataUrl = '';
+    if (avatarFile) {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        avatarDataUrl = e.target.result;
+        iniciarLogin(roomName, participantName, password, avatarDataUrl);
+      };
+      reader.readAsDataURL(avatarFile);
+    } else {
+      iniciarLogin(roomName, participantName, password, DEFAULT_AVATAR);
+    }
+  });
+}
 
-/**
- * Centraliza o fluxo de login e conexão ao LiveKit Cloud
- */
 async function iniciarLogin(roomName, participantName, password, avatarDataUrl) {
-  myRoomName = roomName;
-  myParticipantName = participantName;
-
-  // 1. Busca o JWT token via Serverless Function
   try {
     const res = await fetch(`/api/get-token?roomName=${encodeURIComponent(roomName)}&participantName=${encodeURIComponent(participantName)}&password=${encodeURIComponent(password)}&avatar=${encodeURIComponent(avatarDataUrl)}`);
 
     if (!res.ok) {
       const errData = await res.json();
-      throw new Error(errData.error || 'Erro ao obter token');
+      throw new Error(errData.error || 'Erro ao validar login');
     }
 
-    const data = await res.json();
-    accessToken = data.token;
-    livekitUrl  = data.url;
-  } catch (err) {
-    console.error('[login] Erro ao buscar token:', err);
-    showLoginError(err.message || 'Não foi possível conectar ao servidor.');
-    return;
-  }
+    const { token, url } = await res.json();
 
-  // 2. Instancia e conecta na Room do LiveKit Cloud
-  try {
     const room = new LivekitClient.Room();
     myRoom = room;
 
-    // Escutar faixas de vídeo recebidas
     room.on(LivekitClient.RoomEvent.TrackSubscribed, (track) => {
       if (track.kind === LivekitClient.Track.Kind.Video && remoteVideo) {
-        track.attach(remoteVideo); // Anexa o vídeo usando a SDK nativa
+        track.attach(remoteVideo);
+        remoteVideo.classList.remove('hidden');
+        if (emptyState) emptyState.classList.add('hidden');
       }
     });
 
-    // Escutar faixas removidas
     room.on(LivekitClient.RoomEvent.TrackUnsubscribed, (track) => {
       if (remoteVideo) {
         track.detach(remoteVideo);
+        remoteVideo.classList.add('hidden');
+        if (emptyState) emptyState.classList.remove('hidden');
       }
     });
 
-    // Atualização da lista de participantes
     room.on(LivekitClient.RoomEvent.ParticipantConnected, () => updateParticipantsUI());
     room.on(LivekitClient.RoomEvent.ParticipantDisconnected, () => updateParticipantsUI());
+    room.on(LivekitClient.RoomEvent.Disconnected, () => disconnectRoom());
 
-    room.on(LivekitClient.RoomEvent.Disconnected, () => {
-      disconnectRoom();
-    });
+    await room.connect(url, token);
 
-    // Conectar à sala
-    await room.connect(livekitUrl, accessToken);
-
-    // 3. Atualizar telas
     if (loginScreen) loginScreen.classList.remove('active');
     if (roomScreen) roomScreen.classList.add('active');
+    if (roomNameBadge) roomNameBadge.textContent = roomName;
+
     updateParticipantsUI();
 
   } catch (err) {
-    console.error('[login] Erro inesperado ao conectar:', err);
-    showLoginError('Erro ao conectar na sala do LiveKit.');
+    console.error('[login] Erro:', err);
+    showLoginError(err.message || 'Falha ao conectar no LiveKit.');
   }
 }
 
-/* =====================================================================
- *  2. CONTROLES DE COMPARTILHAMENTO DE TELA
- *  ===================================================================== */
-
+// ─── Botões de Controle ──────────────────────────────────
 if (btnShare) {
   btnShare.addEventListener('click', async () => {
     if (myRoom) {
       try {
         await myRoom.localParticipant.setScreenShareEnabled(true);
-        if (btnShare) btnShare.disabled = true;
-        if (btnStop) btnStop.disabled = false;
+        btnShare.classList.add('hidden');
+        if (btnStop) btnStop.classList.remove('hidden');
       } catch (err) {
-        console.error('[screen-share] Erro ao compartilhar:', err);
+        console.error('Erro ao compartilhar tela:', err);
       }
     }
   });
@@ -160,15 +145,15 @@ if (btnStop) {
   btnStop.addEventListener('click', async () => {
     if (myRoom) {
       await myRoom.localParticipant.setScreenShareEnabled(false);
-      if (btnShare) btnShare.disabled = false;
-      if (btnStop) btnStop.disabled = true;
+      btnStop.classList.add('hidden');
+      if (btnShare) btnShare.classList.remove('hidden');
     }
   });
 }
 
-/* =====================================================================
- *  3. DESCONEXÃO E NAVEGAÇÃO
- *  ===================================================================== */
+if (btnLeave) {
+  btnLeave.addEventListener('click', () => disconnectRoom());
+}
 
 function disconnectRoom() {
   if (myRoom) {
@@ -177,12 +162,7 @@ function disconnectRoom() {
   }
   if (loginScreen) loginScreen.classList.add('active');
   if (roomScreen) roomScreen.classList.remove('active');
-  updateParticipantsUI();
 }
-
-/* =====================================================================
- *  4. INTERFACE DE PARTICIPANTES
- *  ===================================================================== */
 
 function updateParticipantsUI() {
   if (!partList) return;
@@ -190,8 +170,7 @@ function updateParticipantsUI() {
   let count = 0;
 
   if (myRoom && myRoom.remoteParticipants) {
-    count = myRoom.remoteParticipants.size + 1; // Inclui o participante local
-
+    count = myRoom.remoteParticipants.size + 1;
     myRoom.remoteParticipants.forEach((participant) => {
       const li = document.createElement('li');
       li.textContent = participant.identity;
@@ -199,9 +178,7 @@ function updateParticipantsUI() {
     });
   }
 
-  if (partCount) {
-    partCount.textContent = `${count} online`;
-  }
+  if (partCount) partCount.textContent = `${count} online`;
 }
 
 function showLoginError(msg) {
