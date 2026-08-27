@@ -19,7 +19,6 @@
       </div>
       <p class="subtitle">Compartilhe sua tela via LiveKit Cloud</p>
 
-      <!-- Upload do Avatar com Ícone de Tubarão -->
       <div class="avatar-upload">
         <label for="avatar-input" class="avatar-label">
           <img id="avatar-preview" src="data:image/svg+xml;utf8,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20100%20100'%20fill='%235865f2'%3E%3Crect%20width='100'%20height='100'%20fill='%235865f2'%3E%3Ctext%20x='50'%20y='65'%20text-anchor='middle'%20fill='white'%20font-size='50'%20font-family='sans-serif'%3E🦈%3C/text%3E%3C/svg%3E" alt="Avatar" />
@@ -45,6 +44,13 @@
         <span id="participant-count" class="badge">0 online</span>
       </div>
       <div class="topbar-right">
+        <!-- Selector de Qualidade -->
+        <select id="quality-select" class="quality-select" title="Qualidade da Transmissão">
+          <option value="1080p60">1080p (60 FPS)</option>
+          <option value="720p30" selected>720p (30 FPS) - Padrão</option>
+          <option value="480p30">480p (30 FPS)</option>
+        </select>
+
         <button id="btn-share" class="btn-action btn-green" title="Compartilhar Tela">
           <span class="btn-icon">📺</span> Compartilhar Tela
         </button>
@@ -64,7 +70,20 @@
           <p>Ninguém está compartilhando a tela ainda.</p>
           <p class="small">Clique em <strong>"Compartilhar Tela"</strong> para começar!</p>
         </div>
-        <video id="remoteVideo" autoplay playsinline muted class="hidden"></video>
+
+        <!-- Container do Vídeo com Overlay de Controles -->
+        <div id="video-wrapper" class="video-wrapper hidden">
+          <div class="video-overlay">
+            <div class="video-controls-top">
+              <div class="volume-container">
+                <button id="btn-mute" class="overlay-btn" title="Mutar/Desmutar">🔊</button>
+                <input type="range" id="volume-slider" min="0" max="1" step="0.05" value="1" />
+              </div>
+              <button id="btn-fullscreen" class="overlay-btn" title="Tela Cheia">⛶</button>
+            </div>
+          </div>
+          <video id="remoteVideo" autoplay playsinline></video>
+        </div>
       </div>
 
       <aside id="sidebar" class="sidebar">
