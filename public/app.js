@@ -77,14 +77,16 @@ if (joinBtn) {
     }
   });
 }
-
 async function iniciarLogin(roomName, participantName, password, avatarDataUrl) {
   try {
     const res = await fetch(`/api/get-token?roomName=${encodeURIComponent(roomName)}&participantName=${encodeURIComponent(participantName)}&password=${encodeURIComponent(password)}&avatar=${encodeURIComponent(avatarDataUrl)}`);
 
-    if (!res.ok) {
-      const errData = await res.json();
-      throw new Error(errData.error || 'Erro ao validar login');
+    // Verifica se a resposta do servidor não é OK ou se retornou HTML de erro
+    const contentType = res.headers.get("content-type");
+    if (!res.ok || !contentType || !contentType.includes("application/json")) {
+      const textError = await res.text();
+      console.error('[login] Resposta do servidor não-JSON:', textError);
+      throw new Error('Falha no servidor. Verifique as chaves no painel da Vercel.');
     }
 
     const { token, url } = await res.json();
