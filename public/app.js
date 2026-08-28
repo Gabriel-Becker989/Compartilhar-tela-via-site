@@ -75,17 +75,13 @@ async function iniciarLogin(roomName, participantName, password, avatarDataUrl) 
     const { token, url } = await res.json();
 
     const room = new LivekitClient.Room({
-      autoSubscribe: false, // Desativa assinatura automática de vídeo/áudio
+      autoSubscribe: false, // Desativa assinatura automática
     });
     myRoom = room;
 
     room.on(LivekitClient.RoomEvent.TrackSubscribed, (track, publication, participant) => {
-      // TRAVA DE SEGURANÇA: Só renderiza se o participante foi explicitamente selecionado pelo usuário
       if (activeSubscribedSids.has(participant.sid)) {
         renderTrack(track, participant);
-      } else {
-        // Se o servidor tentou assinar automaticamente, forçamos o desinscrição
-        publication.setSubscribed(false);
       }
     });
 
@@ -96,11 +92,14 @@ async function iniciarLogin(roomName, participantName, password, avatarDataUrl) 
     room.on(LivekitClient.RoomEvent.TrackPublished, () => updateParticipantsUI());
     room.on(LivekitClient.RoomEvent.TrackUnpublished, (pub, participant) => {
       activeSubscribedSids.delete(participant.sid);
+      removeWrapper(participant.sid);
       updateParticipantsUI();
     });
+
     room.on(LivekitClient.RoomEvent.ParticipantConnected, () => updateParticipantsUI());
     room.on(LivekitClient.RoomEvent.ParticipantDisconnected, (participant) => {
       activeSubscribedSids.delete(participant.sid);
+      removeWrapper(participant.sid);
       updateParticipantsUI();
     });
     room.on(LivekitClient.RoomEvent.Disconnected, () => disconnectRoom());
@@ -192,11 +191,11 @@ function renderTrack(track, participant) {
   }
 
   const videoEl = wrapper.querySelector('video');
-  if (track.kind === LivekitClient.Track.Kind.Video) {
+  if (track) {
     track.attach(videoEl);
-  } else if (track.kind === LivekitClient.Track.Kind.Audio) {
-    track.attach(videoEl);
-    videoEl.muted = false;
+    if (track.kind === LivekitClient.Track.Kind.Audio) {
+      videoEl.muted = false;
+    }
   }
 }
 
@@ -204,9 +203,13 @@ function removeTrack(track, participant) {
   const wrapper = document.getElementById(`wrapper-${participant.sid}`);
   if (wrapper) {
     const videoEl = wrapper.querySelector('video');
-    if (videoEl) track.detach(videoEl);
-    wrapper.remove();
+    if (videoEl && track) track.detach(videoEl);
   }
+}
+
+function removeWrapper(participantSid) {
+  const wrapper = document.getElementById(`wrapper-${participantSid}`);
+  if (wrapper) wrapper.remove();
 
   const remainingWrappers = videoGrid.querySelectorAll('.video-wrapper');
   if (remainingWrappers.length === 0 && emptyState) {
@@ -324,15 +327,7 @@ function updateParticipantsUI() {
           watchBtn.addEventListener('click', () => {
             activeSubscribedSids.delete(participant.sid);
             participant.tracks.forEach((pub) => pub.setSubscribed(false));
-
-            const wrapper = document.getElementById(`wrapper-${participant.sid}`);
-            if (wrapper) wrapper.remove();
-
-            const remainingWrappers = videoGrid.querySelectorAll('.video-wrapper');
-            if (remainingWrappers.length === 0 && emptyState) {
-              emptyState.classList.remove('hidden');
-            }
-
+            removeWrapper(participant.sid);
             updateParticipantsUI();
           });
         } else {
@@ -343,7 +338,15 @@ function updateParticipantsUI() {
 
           watchBtn.addEventListener('click', () => {
             activeSubscribedSids.add(participant.sid);
-            participant.tracks.forEach((pub) => pub.setSubscribed(true));
+
+            // Assina todas as faixas do participante
+            participant.tracks.forEach((pub) => {
+              pub.setSubscribed(true);
+              if (pub.track) {
+                renderTrack(pub.track, participant);
+              }
+            });
+
             updateParticipantsUI();
           });
         }
