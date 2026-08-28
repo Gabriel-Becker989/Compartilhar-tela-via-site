@@ -326,7 +326,11 @@ function updateParticipantsUI() {
 
           watchBtn.addEventListener('click', () => {
             activeSubscribedSids.delete(participant.sid);
-            participant.tracks.forEach((pub) => pub.setSubscribed(false));
+
+            // Cancela assinatura das publicações de áudio e vídeo
+            participant.videoTrackPublications.forEach((pub) => pub.setSubscribed(false));
+            participant.audioTrackPublications.forEach((pub) => pub.setSubscribed(false));
+
             removeWrapper(participant.sid);
             updateParticipantsUI();
           });
@@ -339,8 +343,15 @@ function updateParticipantsUI() {
           watchBtn.addEventListener('click', () => {
             activeSubscribedSids.add(participant.sid);
 
-            // Assina todas as faixas do participante
-            participant.tracks.forEach((pub) => {
+            // Assina as publicações de vídeo e áudio do participante
+            participant.videoTrackPublications.forEach((pub) => {
+              pub.setSubscribed(true);
+              if (pub.track) {
+                renderTrack(pub.track, participant);
+              }
+            });
+
+            participant.audioTrackPublications.forEach((pub) => {
               pub.setSubscribed(true);
               if (pub.track) {
                 renderTrack(pub.track, participant);
