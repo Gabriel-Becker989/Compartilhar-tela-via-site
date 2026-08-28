@@ -64,25 +64,11 @@
     </header>
 
     <main id="main-content">
-      <div id="video-grid">
+      <div id="video-grid" class="video-grid">
         <div id="empty-state" class="empty-state">
           <div class="empty-icon">📡</div>
           <p>Ninguém está compartilhando a tela ainda ou você não iniciou uma visualização.</p>
           <p class="small">Clique em <strong>"Compartilhar Tela"</strong> ou selecione uma transmissão na lista ao lado!</p>
-        </div>
-
-        <!-- Container do Vídeo com Overlay de Controles -->
-        <div id="video-wrapper" class="video-wrapper hidden">
-          <div class="video-overlay">
-            <div class="video-controls-top">
-              <div class="volume-container">
-                <button id="btn-mute" class="overlay-btn" title="Mutar/Desmutar">🔊</button>
-                <input type="range" id="volume-slider" min="0" max="1" step="0.05" value="1" />
-              </div>
-              <button id="btn-fullscreen" class="overlay-btn" title="Tela Cheia">⛶</button>
-            </div>
-          </div>
-          <video id="remoteVideo" autoplay playsinline></video>
         </div>
       </div>
 

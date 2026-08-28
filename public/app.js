@@ -15,18 +15,12 @@ const btnShare      = document.getElementById('btn-share');
 const btnStop       = document.getElementById('btn-stop');
 const partList      = document.getElementById('participants-list');
 const partCount     = document.getElementById('participant-count');
-const remoteVideo   = document.getElementById('remoteVideo');
-const videoWrapper  = document.getElementById('video-wrapper');
+const videoGrid     = document.getElementById('video-grid');
 const emptyState    = document.getElementById('empty-state');
-
-// Elementos de controle
 const qualitySelect = document.getElementById('quality-select');
-const btnFullscreen = document.getElementById('btn-fullscreen');
-const btnMute       = document.getElementById('btn-mute');
-const volumeSlider  = document.getElementById('volume-slider');
 
 let myRoom = null;
-let currentWatchingParticipantSid = null; // Armazena quem está sendo assistido no momento
+const activeSubscribedSids = new Set();
 
 const DEFAULT_AVATAR = 'data:image/svg+xml;utf8,' + encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">' +
@@ -85,32 +79,24 @@ async function iniciarLogin(roomName, participantName, password, avatarDataUrl) 
     });
     myRoom = room;
 
-    room.on(LivekitClient.RoomEvent.TrackSubscribed, (track) => {
-      if (track.kind === LivekitClient.Track.Kind.Video && remoteVideo) {
-        track.attach(remoteVideo);
-        if (videoWrapper) videoWrapper.classList.remove('hidden');
-        if (emptyState) emptyState.classList.add('hidden');
-      }
-      if (track.kind === LivekitClient.Track.Kind.Audio && remoteVideo) {
-        track.attach(remoteVideo);
-        remoteVideo.muted = false;
-      }
+    room.on(LivekitClient.RoomEvent.TrackSubscribed, (track, publication, participant) => {
+      renderTrack(track, participant);
     });
 
-    room.on(LivekitClient.RoomEvent.TrackUnsubscribed, (track) => {
-      if (remoteVideo) {
-        track.detach(remoteVideo);
-        if (track.kind === LivekitClient.Track.Kind.Video) {
-          if (videoWrapper) videoWrapper.classList.add('hidden');
-          if (emptyState) emptyState.classList.remove('hidden');
-        }
-      }
+    room.on(LivekitClient.RoomEvent.TrackUnsubscribed, (track, publication, participant) => {
+      removeTrack(track, participant);
     });
 
     room.on(LivekitClient.RoomEvent.TrackPublished, () => updateParticipantsUI());
-    room.on(LivekitClient.RoomEvent.TrackUnpublished, () => updateParticipantsUI());
+    room.on(LivekitClient.RoomEvent.TrackUnpublished, (pub, participant) => {
+      activeSubscribedSids.delete(participant.sid);
+      updateParticipantsUI();
+    });
     room.on(LivekitClient.RoomEvent.ParticipantConnected, () => updateParticipantsUI());
-    room.on(LivekitClient.RoomEvent.ParticipantDisconnected, () => updateParticipantsUI());
+    room.on(LivekitClient.RoomEvent.ParticipantDisconnected, (participant) => {
+      activeSubscribedSids.delete(participant.sid);
+      updateParticipantsUI();
+    });
     room.on(LivekitClient.RoomEvent.Disconnected, () => disconnectRoom());
 
     await room.connect(url, token);
@@ -122,6 +108,103 @@ async function iniciarLogin(roomName, participantName, password, avatarDataUrl) 
   } catch (err) {
     console.error('[login] Erro:', err);
     showLoginError('Falha ao conectar no LiveKit.');
+  }
+}
+
+// ─── Criação e Remoção de Quadrados de Vídeo ────────────────
+function renderTrack(track, participant) {
+  if (emptyState) emptyState.classList.add('hidden');
+
+  let wrapper = document.getElementById(`wrapper-${participant.sid}`);
+  if (!wrapper) {
+    wrapper = document.createElement('div');
+    wrapper.id = `wrapper-${participant.sid}`;
+    wrapper.className = 'video-wrapper';
+
+    const tag = document.createElement('div');
+    tag.className = 'stream-owner-tag';
+    tag.textContent = participant.identity;
+    wrapper.appendChild(tag);
+
+    const overlay = document.createElement('div');
+    overlay.className = 'video-overlay';
+
+    const controlsTop = document.createElement('div');
+    controlsTop.className = 'video-controls-top';
+
+    const volContainer = document.createElement('div');
+    volContainer.className = 'volume-container';
+
+    const btnMute = document.createElement('button');
+    btnMute.className = 'overlay-btn';
+    btnMute.textContent = '🔊';
+
+    const slider = document.createElement('input');
+    slider.type = 'range';
+    slider.min = '0';
+    slider.max = '1';
+    slider.step = '0.05';
+    slider.value = '1';
+
+    volContainer.appendChild(btnMute);
+    volContainer.appendChild(slider);
+
+    const btnFullscreen = document.createElement('button');
+    btnFullscreen.className = 'overlay-btn';
+    btnFullscreen.textContent = '⛶';
+
+    controlsTop.appendChild(volContainer);
+    controlsTop.appendChild(btnFullscreen);
+    overlay.appendChild(controlsTop);
+    wrapper.appendChild(overlay);
+
+    const videoEl = document.createElement('video');
+    videoEl.autoplay = true;
+    videoEl.playsInline = true;
+    wrapper.appendChild(videoEl);
+
+    slider.addEventListener('input', (e) => {
+      videoEl.volume = e.target.value;
+      btnMute.textContent = e.target.value == 0 ? '🔇' : '🔊';
+    });
+
+    btnMute.addEventListener('click', () => {
+      videoEl.muted = !videoEl.muted;
+      btnMute.textContent = videoEl.muted ? '🔇' : '🔊';
+      slider.value = videoEl.muted ? 0 : videoEl.volume;
+    });
+
+    btnFullscreen.addEventListener('click', () => {
+      if (!document.fullscreenElement) {
+        wrapper.requestFullscreen().catch(err => console.error(err));
+      } else {
+        document.exitFullscreen();
+      }
+    });
+
+    videoGrid.appendChild(wrapper);
+  }
+
+  const videoEl = wrapper.querySelector('video');
+  if (track.kind === LivekitClient.Track.Kind.Video) {
+    track.attach(videoEl);
+  } else if (track.kind === LivekitClient.Track.Kind.Audio) {
+    track.attach(videoEl);
+    videoEl.muted = false;
+  }
+}
+
+function removeTrack(track, participant) {
+  const wrapper = document.getElementById(`wrapper-${participant.sid}`);
+  if (wrapper) {
+    const videoEl = wrapper.querySelector('video');
+    if (videoEl) track.detach(videoEl);
+    wrapper.remove();
+  }
+
+  const remainingWrappers = videoGrid.querySelectorAll('.video-wrapper');
+  if (remainingWrappers.length === 0 && emptyState) {
+    emptyState.classList.remove('hidden');
   }
 }
 
@@ -173,53 +256,12 @@ if (btnStop) {
   });
 }
 
-// ─── Controles de Volume e Fullscreen ───────────────────────
-if (volumeSlider && remoteVideo) {
-  volumeSlider.addEventListener('input', (e) => {
-    remoteVideo.volume = e.target.value;
-    if (btnMute) btnMute.textContent = e.target.value == 0 ? '🔇' : '🔊';
-  });
-}
-
-if (btnMute && remoteVideo) {
-  btnMute.addEventListener('click', () => {
-    remoteVideo.muted = !remoteVideo.muted;
-    btnMute.textContent = remoteVideo.muted ? '🔇' : '🔊';
-    if (volumeSlider) volumeSlider.value = remoteVideo.muted ? 0 : remoteVideo.volume;
-  });
-}
-
-if (btnFullscreen && videoWrapper) {
-  btnFullscreen.addEventListener('click', () => {
-    if (!document.fullscreenElement) {
-      videoWrapper.requestFullscreen().catch(err => console.error(err));
-    } else {
-      document.exitFullscreen();
-    }
-  });
-}
-
 if (btnLeave) {
   btnLeave.addEventListener('click', () => disconnectRoom());
 }
 
-function stopWatchingCurrentStream() {
-  if (myRoom && currentWatchingParticipantSid) {
-    const participant = myRoom.remoteParticipants.get(currentWatchingParticipantSid);
-    if (participant) {
-      participant.tracks.forEach((pub) => {
-        pub.setSubscribed(false);
-      });
-    }
-  }
-  currentWatchingParticipantSid = null;
-  if (videoWrapper) videoWrapper.classList.add('hidden');
-  if (emptyState) emptyState.classList.remove('hidden');
-  updateParticipantsUI();
-}
-
 function disconnectRoom() {
-  stopWatchingCurrentStream();
+  activeSubscribedSids.clear();
   if (myRoom) {
     myRoom.disconnect();
     myRoom = null;
@@ -228,7 +270,7 @@ function disconnectRoom() {
   if (roomScreen) roomScreen.classList.remove('active');
 }
 
-// ─── Lista de Participantes e Botão Dinâmico (Câmera / X) ─────
+// ─── Lista de Participantes e Botão Independente ─────────────
 function updateParticipantsUI() {
   if (!partList || !myRoom) return;
   partList.innerHTML = '';
@@ -256,7 +298,6 @@ function updateParticipantsUI() {
       nameSpan.textContent = participant.identity;
       li.appendChild(nameSpan);
 
-      // Verifica se o participante possui uma transmissão ativa
       let hasScreenShare = false;
       participant.videoTrackPublications.forEach((pub) => {
         if (pub.source === LivekitClient.Track.Source.ScreenShare || pub.trackName === 'screen') {
@@ -266,35 +307,37 @@ function updateParticipantsUI() {
 
       if (hasScreenShare) {
         const watchBtn = document.createElement('button');
-        const isWatchingThis = (currentWatchingParticipantSid === participant.sid);
+        const isWatching = activeSubscribedSids.has(participant.sid);
 
-        if (isWatchingThis) {
-          // ESTADO: Assistindo -> Exibe botão Vermelho com "❌"
+        if (isWatching) {
+          // ESTADO: Assistindo -> Botão Vermelho para fechar
           watchBtn.className = 'btn-watch-stream stop';
           watchBtn.textContent = '❌';
           watchBtn.title = 'Parar de assistir transmissão';
 
           watchBtn.addEventListener('click', () => {
-            stopWatchingCurrentStream();
+            activeSubscribedSids.delete(participant.sid);
+            participant.tracks.forEach((pub) => pub.setSubscribed(false));
+
+            const wrapper = document.getElementById(`wrapper-${participant.sid}`);
+            if (wrapper) wrapper.remove();
+
+            const remainingWrappers = videoGrid.querySelectorAll('.video-wrapper');
+            if (remainingWrappers.length === 0 && emptyState) {
+              emptyState.classList.remove('hidden');
+            }
+
+            updateParticipantsUI();
           });
         } else {
-          // ESTADO: Não assistindo -> Exibe botão Verde com "🎥"
+          // ESTADO: Não assistindo -> Botão Verde com câmera para abrir
           watchBtn.className = 'btn-watch-stream start';
           watchBtn.textContent = '🎥';
           watchBtn.title = 'Clique para assistir a transmissão';
 
           watchBtn.addEventListener('click', () => {
-            // Se já estiver assistindo outro participante, para de assistir primeiro
-            if (currentWatchingParticipantSid) {
-              stopWatchingCurrentStream();
-            }
-
-            // Ativa a assinatura para o participante clicado
-            currentWatchingParticipantSid = participant.sid;
-            participant.tracks.forEach((pub) => {
-              pub.setSubscribed(true);
-            });
-
+            activeSubscribedSids.add(participant.sid);
+            participant.tracks.forEach((pub) => pub.setSubscribed(true));
             updateParticipantsUI();
           });
         }
