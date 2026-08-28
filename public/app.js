@@ -80,7 +80,13 @@ async function iniciarLogin(roomName, participantName, password, avatarDataUrl) 
     myRoom = room;
 
     room.on(LivekitClient.RoomEvent.TrackSubscribed, (track, publication, participant) => {
-      renderTrack(track, participant);
+      // TRAVA DE SEGURANÇA: Só renderiza se o participante foi explicitamente selecionado pelo usuário
+      if (activeSubscribedSids.has(participant.sid)) {
+        renderTrack(track, participant);
+      } else {
+        // Se o servidor tentou assinar automaticamente, forçamos o desinscrição
+        publication.setSubscribed(false);
+      }
     });
 
     room.on(LivekitClient.RoomEvent.TrackUnsubscribed, (track, publication, participant) => {
