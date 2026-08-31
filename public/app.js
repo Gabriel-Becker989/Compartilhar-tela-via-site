@@ -22,6 +22,11 @@ const qualitySelect = document.getElementById('quality-select');
 let myRoom = null;
 const activeSubscribedSids = new Set();
 
+// Define a URL base da Vercel para compatibilidade com Electron e Web
+const VERCEL_API_URL = window.location.protocol.startsWith('http')
+? ''
+: 'https://compartilhar-tela-via-site.vercel.app';
+
 const DEFAULT_AVATAR = 'data:image/svg+xml;utf8,' + encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">' +
   '<rect width="100" height="100" fill="%235865f2"/>' +
@@ -71,7 +76,7 @@ if (joinBtn) {
 
 async function iniciarLogin(roomName, participantName, password, avatarDataUrl) {
   try {
-    const res = await fetch(`/api/get-token?roomName=${encodeURIComponent(roomName)}&participantName=${encodeURIComponent(participantName)}&password=${encodeURIComponent(password)}&avatar=${encodeURIComponent(avatarDataUrl)}`);
+    const res = await fetch(`${VERCEL_API_URL}/api/get-token?roomName=${encodeURIComponent(roomName)}&participantName=${encodeURIComponent(participantName)}&password=${encodeURIComponent(password)}&avatar=${encodeURIComponent(avatarDataUrl)}`);
     const { token, url } = await res.json();
 
     const room = new LivekitClient.Room({

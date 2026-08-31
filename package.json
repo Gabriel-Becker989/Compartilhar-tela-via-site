@@ -1,8 +1,35 @@
 {
-  "name": "compartilhar-tela-via-site",
+  "name": "compartilhar-tela-collab",
   "version": "1.0.0",
-  "private": true,
+  "description": "App de Compartilhamento de Tela com Audio de Aplicacao",
+  "main": "main.js",
+  "scripts": {
+  "start": "electron . --enable-features=UseOzonePlatform --ozone-platform=wayland --disable-gpu",
+  "build:win": "electron-builder --win",
+  "build:linux": "electron-builder --linux AppImage"
+},
   "dependencies": {
-    "livekit-server-sdk": "^2.6.0"
+    "livekit-server-sdk": "^2.1.0"
+  },
+  "devDependencies": {
+    "electron": "^28.2.0",
+    "electron-builder": "^24.9.0"
+  },
+  "build": {
+    "appId": "com.screenshare.collab",
+    "files": [
+      "main.js",
+      "preload.js",
+      "public/**/*"
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "linux": {
+      "target": "AppImage"
+    }
+  },
+  "allowScripts": {
+    "electron@28.3.3": true
   }
 }
