@@ -8,18 +8,16 @@
     "dev": "electron . --dev",
     "rebuild": "node-gyp rebuild",
     "build:win": "npm run rebuild && electron-builder --win",
-    "build:linux": "electron-builder --linux AppImage",
-    "postinstall": "node-gyp rebuild"
+    "build:linux": "electron-builder --linux AppImage"
   },
   "dependencies": {
-    "livekit-server-sdk": "^2.1.0",
-    "node-addon-api": "^7.1.0"
+    "livekit-server-sdk": "^2.1.0"
   },
   "devDependencies": {
     "electron": "^28.2.0",
     "electron-builder": "^24.9.0",
     "node-gyp": "^10.1.0",
-    "@node-rs/helper": "^1.0.0"
+    "node-addon-api": "^7.1.0"
   },
   "build": {
     "appId": "com.screenshare.collab",
