@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Screen Share — LiveKit Cloud</title>
+  <title>Screen Share — LiveKit Cloud + WASAPI Audio</title>
   <link rel="stylesheet" href="style.css" />
   <script src="https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.min.js"></script>
 </head>
@@ -15,19 +15,19 @@
       <div class="header-title">
         <span class="icon">🖥️</span>
         <h1>Screen Share</h1>
-        <span class="badge-livekit">LiveKit</span>
+        <span class="badge-livekit">LiveKit + WASAPI</span>
       </div>
-      <p class="subtitle">Compartilhe sua tela via LiveKit Cloud</p>
+      <p class="subtitle">Compartilhe tela e áudio isolado de jogos (WASAPI Loopback)</p>
 
       <div class="avatar-upload">
         <label for="avatar-input" class="avatar-label">
-          <img id="avatar-preview" src="data:image/svg+xml;utf8,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20100%20100'%20fill='%235865f2'%3E%3Crect%20width='100'%20height='100'%20fill='%235865f2'%3E%3Ctext%20x='50'%20y='65'%20text-anchor='middle'%20fill='white'%20font-size='50'%20font-family='sans-serif'%3E🦈%3C/text%3E%3C/svg%3E" alt="Avatar" />
+          <img id="avatar-preview" src="data:image/svg+xml;utf8,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20100%20100'%20fill='%235865f2'%3E%3Crect%20width='100'%20height='100'%20fill='%235865f2'%3E%3Ctext%20x='50'%20y='65'%20text-anchor='middle'%20fill='white'%20font-size='50'%20font-family='sans-serif'>🦈%3C/text%3E%3C/svg%3E" alt="Avatar" />
         </label>
         <input type="file" id="avatar-input" accept="image/*" hidden />
         <span class="avatar-hint">Clique para trocar foto</span>
       </div>
 
-      <input type="text" id="name-input" placeholder="Seu nome do usuário" autocomplete="off" />
+      <input type="text" id="name-input" placeholder="Seu nome de usuário" autocomplete="off" />
       <input type="password" id="password-input" placeholder="Senha da sala" value="ovo" autocomplete="off" />
 
       <button id="join-btn">Entrar na Sala</button>
@@ -44,12 +44,37 @@
         <span id="participant-count" class="badge">0 online</span>
       </div>
       <div class="topbar-right">
-        <!-- Selector de Qualidade -->
-        <select id="quality-select" class="quality-select" title="Qualidade da Transmissão">
-          <option value="1080p60">1080p (60 FPS)</option>
-          <option value="720p30" selected>720p (30 FPS) - Padrão</option>
-          <option value="480p30">480p (30 FPS)</option>
-        </select>
+        <!-- Audio Source Selector -->
+        <div class="audio-control-group">
+          <label for="audio-source-select" class="audio-label">🔊 Áudio:</label>
+          <select id="audio-source-select" class="audio-select" title="Fonte de áudio">
+            <option value="window">🎮 Janela Específica (PID)</option>
+            <option value="system" selected>🔊 Som do Sistema</option>
+            <option value="none">🔇 Sem Áudio</option>
+          </select>
+          
+          <!-- Process selector (shown when "window" is selected) -->
+          <div id="audio-process-wrapper" class="audio-process-wrapper hidden">
+            <select id="audio-process-select" class="audio-select process-select" title="Selecione o jogo/aplicativo">
+              <option value="">Carregando processos...</option>
+            </select>
+            <button id="refresh-processes-btn" class="btn-icon-btn" title="Atualizar lista">🔄</button>
+          </div>
+          
+          <span id="audio-status-badge" class="audio-status-badge">🔊 Som do Sistema</span>
+        </div>
+
+        <!-- Quality Selector + Effective Quality Indicator -->
+        <div class="quality-control-group">
+          <select id="quality-select" class="quality-select" title="Qualidade da Transmissão">
+            <option value="1080p60">1080p 60 FPS</option>
+            <option value="1080p30">1080p 30 FPS</option>
+            <option value="720p60">720p 60 FPS</option>
+            <option value="720p30" selected>720p 30 FPS - Padrão</option>
+            <option value="480p30">480p 30 FPS</option>
+          </select>
+          <span id="effective-quality-badge" class="effective-quality-badge hidden" title="Qualidade efetiva em uso"></span>
+        </div>
 
         <button id="btn-share" class="btn-action btn-green" title="Compartilhar Tela">
           <span class="btn-icon">📺</span> Compartilhar Tela

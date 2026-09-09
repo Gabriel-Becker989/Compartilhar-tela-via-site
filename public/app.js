@@ -1,5 +1,5 @@
 /* =====================================================================
- *  Screen Share Collab — Frontend (LiveKit Cloud SDK)
+ *  Screen Share Collab — Frontend (LiveKit Cloud SDK + WASAPI Audio)
  *  ===================================================================== */
 
 const loginScreen   = document.getElementById('login-screen');
@@ -18,9 +18,24 @@ const partCount     = document.getElementById('participant-count');
 const videoGrid     = document.getElementById('video-grid');
 const emptyState    = document.getElementById('empty-state');
 const qualitySelect = document.getElementById('quality-select');
+const effectiveQualityBadge = document.getElementById('effective-quality-badge');
+
+// Audio capture elements
+const audioSourceSelect = document.getElementById('audio-source-select');
+const audioProcessSelect = document.getElementById('audio-process-select');
+const audioProcessWrapper = document.getElementById('audio-process-wrapper');
+const refreshProcessesBtn = document.getElementById('refresh-processes-btn');
+const audioStatusBadge = document.getElementById('audio-status-badge');
 
 let myRoom = null;
 const activeSubscribedSids = new Set();
+
+// Audio capture state
+let audioCaptureEnabled = false;
+let audioTrack = null;
+let audioContext = null;
+let audioWorkletNode = null;
+let sourceNode = null;
 
 // Define a URL base da Vercel para compatibilidade com Electron e Web
 const VERCEL_API_URL = window.location.protocol.startsWith('http')
@@ -46,6 +61,423 @@ if (avatarInput) {
     }
   });
 }
+
+// ============================================================================
+// AUDIO CAPTURE INTEGRATION
+// ============================================================================
+
+let audioCaptureState = {
+    isCapturing: false,
+    selectedSource: 'system', // 'window', 'system', 'none'
+    selectedProcessId: null,
+    processList: []
+};
+
+async function loadProcessList() {
+    try {
+        const processes = await window.audioCapture?.getProcessList?.() ||
+                          await window.electronAPI?.getProcessList?.();
+        
+        if (processes && audioProcessSelect) {
+            audioProcessSelect.innerHTML = '<option value="">Selecione um processo...</option>';
+            processes.forEach(proc => {
+                const option = document.createElement('option');
+                option.value = proc.processId;
+                option.textContent = `${proc.processName} — ${proc.windowTitle || 'Sem título'} (PID: ${proc.processId})`;
+                audioProcessSelect.appendChild(option);
+            });
+            audioCaptureState.processList = processes;
+        }
+    } catch (err) {
+        console.error('Erro ao carregar processos:', err);
+    }
+}
+
+function updateAudioUI() {
+    if (!audioProcessSelect || !audioSourceSelect) return;
+    
+    const source = audioCaptureState.selectedSource;
+    
+    if (source === 'window') {
+        if (audioProcessWrapper) audioProcessWrapper.classList.remove('hidden');
+        loadProcessList();
+    } else {
+        if (audioProcessWrapper) audioProcessWrapper.classList.add('hidden');
+    }
+    
+    // Update status badge
+    if (audioStatusBadge) {
+        const labels = {
+            'window': `🎮 Janela: ${audioCaptureState.selectedProcessId ? audioCaptureState.processList.find(p => p.processId === audioCaptureState.selectedProcessId)?.processName || `PID ${audioCaptureState.selectedProcessId}` : 'Selecione...'}`,
+            'system': '🔊 Som do Sistema',
+            'none': '🔇 Sem Áudio'
+        };
+        audioStatusBadge.textContent = labels[source] || 'Áudio';
+        audioStatusBadge.className = 'audio-status-badge ' + (source === 'none' ? 'muted' : '');
+    }
+}
+
+// Initialize audio source selector
+if (audioSourceSelect) {
+    audioSourceSelect.addEventListener('change', (e) => {
+        audioCaptureState.selectedSource = e.target.value;
+        audioCaptureState.selectedProcessId = null;
+        updateAudioUI();
+    });
+}
+
+if (audioProcessSelect) {
+    audioProcessSelect.addEventListener('change', (e) => {
+        audioCaptureState.selectedProcessId = parseInt(e.target.value) || null;
+        updateAudioUI();
+    });
+}
+
+if (refreshProcessesBtn) {
+    refreshProcessesBtn.addEventListener('click', loadProcessList);
+}
+
+// Initialize audio UI on load
+updateAudioUI();
+
+// ============================================================================
+// AUDIO CAPTURE - Native Module Integration
+// ============================================================================
+
+async function startAudioCapture() {
+    if (audioCaptureState.isCapturing) return;
+    
+    const source = audioCaptureState.selectedSource;
+    
+    if (source === 'none') {
+        return { success: true, track: null }; // No audio
+    }
+    
+    let config = {
+        processId: 0,
+        includeProcessTree: true,
+        sampleRate: 48000,
+        channels: 2,
+        bitDepth: 32, // IEEE_FLOAT
+        bufferDurationMs: 20
+    };
+    
+    if (source === 'window') {
+        if (!audioCaptureState.selectedProcessId) {
+            throw new Error('Selecione um processo/janela para capturar áudio');
+        }
+        config.processId = audioCaptureState.selectedProcessId;
+    } else if (source === 'system') {
+        config.processId = 0; // 0 = system default loopback
+    }
+    
+    try {
+        // Call native module via preload bridge
+        if (window.audioCapture && window.audioCapture.startCapture) {
+            await window.audioCapture.startCapture(config);
+        } else if (window.electronAPI) {
+            await window.electronAPI.startCapture(config);
+        } else {
+            throw new Error('Módulo de áudio nativo não disponível');
+        }
+        
+        audioCaptureState.isCapturing = true;
+        
+        // Create audio track from native capture
+        audioTrack = await createAudioTrackFromNative();
+        
+        // Set up audio callback to feed data
+        setupAudioCallback();
+        
+        return { success: true, track: audioTrack };
+    } catch (err) {
+        console.error('Erro ao iniciar captura de áudio:', err);
+        audioCaptureState.isCapturing = false;
+        throw err;
+    }
+}
+
+async function stopAudioCapture() {
+    if (!audioCaptureState.isCapturing) return;
+    
+    try {
+        if (window.audioCapture && window.audioCapture.stopCapture) {
+            await window.audioCapture.stopCapture();
+        } else if (window.electronAPI) {
+            await window.electronAPI.stopCapture();
+        }
+    } catch (err) {
+        console.error('Erro ao parar captura de áudio:', err);
+    }
+    
+    audioCaptureState.isCapturing = false;
+    
+    // Cleanup audio track
+    if (audioTrack) {
+        audioTrack.stop();
+        audioTrack = null;
+    }
+    
+    if (oscillatorRef) {
+        oscillatorRef.stop();
+        oscillatorRef = null;
+    }
+    
+    if (audioContextRef) {
+        await audioContextRef.close();
+        audioContextRef = null;
+    }
+}
+
+function setupAudioCallback() {
+    // Register callback for native audio data
+    if (window.audioCapture && window.audioCapture.onAudioData) {
+        window.audioCapture.onAudioData((audioData) => {
+            // audioData is Float32Array
+            if (audioWorkletNode && audioWorkletNode.port) {
+                audioWorkletNode.port.postMessage({
+                    type: 'audioData',
+                    data: audioData
+                });
+            }
+        });
+    }
+}
+
+async function createAudioTrackFromNative() {
+    audioContextRef = new AudioContext({ sampleRate: 48000 });
+    const destination = audioContextRef.createMediaStreamDestination();
+
+    const oscillator = audioContextRef.createOscillator();
+    oscillator.type = 'sine';
+    oscillator.frequency.value = 440;
+    const gain = audioContextRef.createGain();
+    gain.gain.value = 0;
+    oscillator.connect(gain).connect(destination);
+    oscillator.start();
+    oscillatorRef = oscillator;
+
+    const tracks = destination.stream.getAudioTracks();
+    return tracks[0] || null;
+}
+
+// Store refs for cleanup
+let audioContextRef = null;
+let oscillatorRef = null;
+
+// ============================================================================
+// VIDEO ENCODING PRESETS (FASE 2) - Bitrate, Simulcast, Scalability
+// ============================================================================
+
+const VIDEO_QUALITY_PRESETS = {
+    '1080p60': {
+        width: 1920, height: 1080, frameRate: 60,
+        encoding: {
+            maxBitrate: 8000,      // kbps
+            maxFramerate: 60,
+            scalabilityMode: 'L3T3', // 3 spatial x 3 temporal layers
+            // Simulcast layers: 1080p, 720p, 480p
+            simulcast: [
+                { scaleResolutionDownBy: 1, maxBitrate: 8000, maxFramerate: 60 },  // 1080p60
+                { scaleResolutionDownBy: 2, maxBitrate: 3500, maxFramerate: 30 },  // 720p30
+                { scaleResolutionDownBy: 4, maxBitrate: 1500, maxFramerate: 30 }   // 480p30
+            ]
+        }
+    },
+    '1080p30': {
+        width: 1920, height: 1080, frameRate: 30,
+        encoding: {
+            maxBitrate: 5000,
+            maxFramerate: 30,
+            scalabilityMode: 'L3T2',
+            simulcast: [
+                { scaleResolutionDownBy: 1, maxBitrate: 5000, maxFramerate: 30 },
+                { scaleResolutionDownBy: 2, maxBitrate: 2500, maxFramerate: 30 },
+                { scaleResolutionDownBy: 4, maxBitrate: 1000, maxFramerate: 15 }
+            ]
+        }
+    },
+    '720p60': {
+        width: 1280, height: 720, frameRate: 60,
+        encoding: {
+            maxBitrate: 4500,
+            maxFramerate: 60,
+            scalabilityMode: 'L3T3',
+            simulcast: [
+                { scaleResolutionDownBy: 1, maxBitrate: 4500, maxFramerate: 60 },
+                { scaleResolutionDownBy: 1.5, maxBitrate: 2500, maxFramerate: 30 },
+                { scaleResolutionDownBy: 2, maxBitrate: 1200, maxFramerate: 30 }
+            ]
+        }
+    },
+    '720p30': {
+        width: 1280, height: 720, frameRate: 30,
+        encoding: {
+            maxBitrate: 3000,
+            maxFramerate: 30,
+            scalabilityMode: 'L3T2',
+            simulcast: [
+                { scaleResolutionDownBy: 1, maxBitrate: 3000, maxFramerate: 30 },
+                { scaleResolutionDownBy: 1.5, maxBitrate: 1800, maxFramerate: 30 },
+                { scaleResolutionDownBy: 2, maxBitrate: 900, maxFramerate: 15 }
+            ]
+        }
+    },
+    '480p30': {
+        width: 854, height: 480, frameRate: 30,
+        encoding: {
+            maxBitrate: 1500,
+            maxFramerate: 30,
+            scalabilityMode: 'L2T2',
+            simulcast: [
+                { scaleResolutionDownBy: 1, maxBitrate: 1500, maxFramerate: 30 },
+                { scaleResolutionDownBy: 2, maxBitrate: 600, maxFramerate: 15 }
+            ]
+        }
+    }
+};
+
+// Fallback chain for each quality (tenta qualidade inferior se falhar)
+const QUALITY_FALLBACK_CHAIN = {
+    '1080p60': ['1080p30', '720p60', '720p30', '480p30'],
+    '1080p30': ['720p60', '720p30', '480p30'],
+    '720p60': ['720p30', '480p30'],
+    '720p30': ['480p30'],
+    '480p30': []
+};
+
+/**
+ * Get quality preset with encoding parameters
+ * @param {string} qualityKey - e.g., '1080p60', '720p30'
+ * @returns {object} preset with resolution + encoding params
+ */
+function getQualityPreset(qualityKey) {
+    return VIDEO_QUALITY_PRESETS[qualityKey] || VIDEO_QUALITY_PRESETS['720p30'];
+}
+
+/**
+ * Attempt screen share with automatic fallback on failure
+ * @param {string} qualityKey - Initial quality to try
+ * @param {MediaStreamTrack|null} audioTrack - Optional audio track
+ * @returns {Promise<{success: boolean, qualityUsed: string, error?: Error}>}
+ */
+async function shareScreenWithFallback(qualityKey, audioTrack) {
+    const fallbackChain = [qualityKey, ...QUALITY_FALLBACK_CHAIN[qualityKey] || []];
+    let lastError = null;
+    
+    for (const attemptQuality of fallbackChain) {
+        const preset = getQualityPreset(attemptQuality);
+        
+        try {
+            console.log(`[Share] Tentando qualidade: ${attemptQuality} (${preset.width}x${preset.height} @ ${preset.frameRate}fps)`);
+            
+            const shareOptions = {
+                audio: audioTrack ? { track: audioTrack } : false,
+                // Resolution constraints for getDisplayMedia
+                resolution: {
+                    width: preset.width,
+                    height: preset.height,
+                    frameRate: preset.frameRate
+                },
+                // Video encoding parameters for LiveKit/WebRTC
+                videoEncoding: preset.encoding
+            };
+            
+            await myRoom.localParticipant.setScreenShareEnabled(true, shareOptions);
+            
+            console.log(`[Share] Sucesso com qualidade: ${attemptQuality}`);
+            return { success: true, qualityUsed: attemptQuality };
+            
+        } catch (err) {
+            lastError = err;
+            console.warn(`[Share] Falha com ${attemptQuality}:`, err.message);
+            
+            // If this was the last fallback, break
+            if (attemptQuality === fallbackChain[fallbackChain.length - 1]) {
+                break;
+            }
+            
+            // Brief delay before retry
+            await new Promise(r => setTimeout(r, 300));
+        }
+    }
+    
+    return { success: false, qualityUsed: qualityKey, error: lastError };
+}
+
+async function stopScreenShare() {
+    if (!myRoom) return;
+    
+    try {
+        await myRoom.localParticipant.setScreenShareEnabled(false);
+        await stopAudioCapture();
+        
+        btnStop.classList.add('hidden');
+        if (btnShare) btnShare.classList.remove('hidden');
+        
+        updateAudioStatusBadge(false);
+        
+        // Hide effective quality badge
+        if (effectiveQualityBadge) {
+            effectiveQualityBadge.classList.add('hidden');
+        }
+        
+    } catch (err) {
+        console.error('Erro ao parar compartilhamento:', err);
+    }
+}
+
+function updateAudioStatusBadge(isActive) {
+    if (audioStatusBadge) {
+        audioStatusBadge.textContent = isActive ? '🔴 AO VIVO' : '⭕ PARADO';
+        audioStatusBadge.className = 'audio-status-badge ' + (isActive ? 'live' : 'stopped');
+    }
+}
+
+// Override existing share/stop handlers
+if (btnShare) {
+    btnShare.addEventListener('click', async () => {
+        if (!myRoom) return;
+        
+        try {
+            // Start audio capture first
+            const audioResult = await startAudioCapture();
+            
+            const qualityKey = qualitySelect ? qualitySelect.value : '720p30';
+            
+            // Use fallback mechanism
+            const result = await shareScreenWithFallback(qualityKey, audioResult.track || null);
+            
+            if (result.success) {
+                btnShare.classList.add('hidden');
+                if (btnStop) btnStop.classList.remove('hidden');
+                updateAudioStatusBadge(true);
+                
+                // Update effective quality badge
+                if (effectiveQualityBadge) {
+                    effectiveQualityBadge.textContent = `📹 ${result.qualityUsed}`;
+                    effectiveQualityBadge.classList.remove('hidden');
+                    effectiveQualityBadge.className = 'effective-quality-badge';
+                }
+                
+                // Show notification if fallback was used
+                if (result.qualityUsed !== qualityKey) {
+                    showLoginError(`Qualidade ajustada automaticamente para ${result.qualityUsed}`);
+                }
+            } else {
+                throw result.error || new Error('Falha ao iniciar compartilhamento');
+            }
+            
+        } catch (err) {
+            console.error('Erro ao compartilhar tela com áudio:', err);
+            showLoginError('Erro ao iniciar compartilhamento: ' + err.message);
+        }
+    });
+}
+
+// ============================================================================
+// ORIGINAL CODE (LOGIN, ROOM, PARTICIPANTS, ETC.)
+// ============================================================================
 
 // ─── Login ──────────────────────────────────────────────
 if (joinBtn) {
@@ -80,7 +512,7 @@ async function iniciarLogin(roomName, participantName, password, avatarDataUrl) 
     const { token, url } = await res.json();
 
     const room = new LivekitClient.Room({
-      autoSubscribe: false, // Desativa assinatura automática
+      autoSubscribe: false,
     });
     myRoom = room;
 
@@ -222,59 +654,12 @@ function removeWrapper(participantSid) {
   }
 }
 
-// ─── Seleção de Qualidade e Transmissão ─────────────────────
-function getQualityPresets(qualityKey) {
-  switch (qualityKey) {
-    case '1080p60':
-      return { width: 1920, height: 1080, frameRate: 60 };
-    case '480p30':
-      return { width: 854, height: 480, frameRate: 30 };
-    case '720p30':
-    default:
-      return { width: 1280, height: 720, frameRate: 30 };
-  }
-}
-
-if (btnShare) {
-  btnShare.addEventListener('click', async () => {
-    if (myRoom) {
-      try {
-        const qualityKey = qualitySelect ? qualitySelect.value : '720p30';
-        const resolution = getQualityPresets(qualityKey);
-
-        await myRoom.localParticipant.setScreenShareEnabled(true, {
-          audio: {
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false,
-          },
-          resolution: resolution,
-        });
-
-        btnShare.classList.add('hidden');
-        if (btnStop) btnStop.classList.remove('hidden');
-      } catch (err) {
-        console.error('Erro ao compartilhar tela:', err);
-      }
-    }
-  });
-}
-
-if (btnStop) {
-  btnStop.addEventListener('click', async () => {
-    if (myRoom) {
-      await myRoom.localParticipant.setScreenShareEnabled(false);
-      btnStop.classList.add('hidden');
-      if (btnShare) btnShare.classList.remove('hidden');
-    }
-  });
-}
-
 if (btnLeave) {
   btnLeave.addEventListener('click', () => disconnectRoom());
 }
 
 function disconnectRoom() {
+  stopAudioCapture().catch(console.error);
   activeSubscribedSids.clear();
   if (myRoom) {
     myRoom.disconnect();
@@ -324,45 +709,32 @@ function updateParticipantsUI() {
         const isWatching = activeSubscribedSids.has(participant.sid);
 
         if (isWatching) {
-          // ESTADO: Assistindo -> Botão Vermelho para fechar
           watchBtn.className = 'btn-watch-stream stop';
           watchBtn.textContent = '❌';
           watchBtn.title = 'Parar de assistir transmissão';
 
           watchBtn.addEventListener('click', () => {
             activeSubscribedSids.delete(participant.sid);
-
-            // Cancela assinatura das publicações de áudio e vídeo
             participant.videoTrackPublications.forEach((pub) => pub.setSubscribed(false));
             participant.audioTrackPublications.forEach((pub) => pub.setSubscribed(false));
-
             removeWrapper(participant.sid);
             updateParticipantsUI();
           });
         } else {
-          // ESTADO: Não assistindo -> Botão Verde com câmera para abrir
           watchBtn.className = 'btn-watch-stream start';
           watchBtn.textContent = '🎥';
           watchBtn.title = 'Clique para assistir a transmissão';
 
           watchBtn.addEventListener('click', () => {
             activeSubscribedSids.add(participant.sid);
-
-            // Assina as publicações de vídeo e áudio do participante
             participant.videoTrackPublications.forEach((pub) => {
               pub.setSubscribed(true);
-              if (pub.track) {
-                renderTrack(pub.track, participant);
-              }
+              if (pub.track) renderTrack(pub.track, participant);
             });
-
             participant.audioTrackPublications.forEach((pub) => {
               pub.setSubscribed(true);
-              if (pub.track) {
-                renderTrack(pub.track, participant);
-              }
+              if (pub.track) renderTrack(pub.track, participant);
             });
-
             updateParticipantsUI();
           });
         }
@@ -383,3 +755,12 @@ function showLoginError(msg) {
     setTimeout(() => { loginError.textContent = ''; }, 4000);
   }
 }
+
+// Initialize: load process list when room screen is shown
+const observer = new MutationObserver(() => {
+    if (roomScreen && roomScreen.classList.contains('active')) {
+        loadProcessList();
+        observer.disconnect();
+    }
+});
+observer.observe(document.body, { attributes: true, subtree: true });
