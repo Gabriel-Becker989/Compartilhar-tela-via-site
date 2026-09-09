@@ -7,7 +7,7 @@
     "start": "electron . --disable-gpu --disable-gpu-compositing --no-sandbox",
     "dev": "electron . --dev",
     "rebuild": "node-gyp rebuild",
-    "build:win": "npm run rebuild && electron-builder --win",
+    "build:win": "npm install node-addon-api node-gyp --no-save && node-gyp rebuild && electron-builder --win",
     "build:linux": "electron-builder --linux AppImage"
   },
   "dependencies": {
@@ -15,9 +15,7 @@
   },
   "devDependencies": {
     "electron": "^28.2.0",
-    "electron-builder": "^24.9.0",
-    "node-gyp": "^10.1.0",
-    "node-addon-api": "^7.1.0"
+    "electron-builder": "^24.9.0"
   },
   "build": {
     "appId": "com.screenshare.collab",
@@ -33,8 +31,5 @@
     "linux": {
       "target": "AppImage"
     }
-  },
-  "allowScripts": {
-    "electron@28.3.3": true
   }
 }

@@ -510,6 +510,7 @@
     "user_agent": "npm/11.17.0 node/v24.19.0 linux x64 workspaces/false",
     "userconfig": "/home/gabriel/.npmrc",
     "local_prefix": "/home/gabriel/Pessoal/Projetos/Compartilhar tela discord/Compartilhar-tela-via-site-main/Compartilhar tela discord",
+    "package_lock_only": "true",
     "prefix": "/home/gabriel/.nvm/versions/node/v24.19.0",
     "npm_version": "11.17.0",
     "cache": "/home/gabriel/.npm",
