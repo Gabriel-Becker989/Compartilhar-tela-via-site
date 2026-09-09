@@ -104,6 +104,24 @@
     </main>
   </div>
 
+  <!-- ====== SOURCE PICKER MODAL ====== -->
+  <div id="source-picker-modal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2>📺 Selecione o que compartilhar</h2>
+        <button id="source-picker-close" class="modal-close">&times;</button>
+      </div>
+      <div id="source-picker-tabs" class="source-tabs">
+        <button class="source-tab active" data-type="screen">🖥️ Telas</button>
+        <button class="source-tab" data-type="window">🪟 Janelas</button>
+      </div>
+      <div id="source-picker-grid" class="source-grid"></div>
+      <div class="modal-footer">
+        <button id="source-picker-cancel" class="btn-action btn-neutral">Cancelar</button>
+      </div>
+    </div>
+  </div>
+
   <script src="app.js"></script>
 </body>
 </html>

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, desktopCapturer } = require('electron');
+const { app, BrowserWindow, ipcMain, desktopCapturer, session } = require('electron');
 const path = require('path');
 const { execSync, spawn } = require('child_process');
 
@@ -237,6 +237,20 @@ function createLinuxAudioModule() {
 // Desativa aceleração de hardware para evitar travamentos
 app.disableHardwareAcceleration();
 
+// Allow screen capture and media permissions in renderer
+app.whenReady().then(() => {
+    session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
+        const allowed = [
+            'media',
+            'mediaCapture',
+            'display-capture',
+            'audioCapture',
+            'videoCapture'
+        ].includes(permission);
+        callback(allowed);
+    });
+});
+
 function createWindow() {
     const win = new BrowserWindow({
         width: 1280,
@@ -269,7 +283,8 @@ ipcMain.handle('get-sources', async () => {
     return sources.map(source => ({
         id: source.id,
         name: source.name,
-        thumbnail: source.thumbnail.toDataURL()
+        display_id: source.display_id || '',
+        thumbnail: source.thumbnail.isEmpty() ? '' : source.thumbnail.toDataURL()
     }));
 });
 

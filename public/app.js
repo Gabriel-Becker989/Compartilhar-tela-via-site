@@ -73,6 +73,12 @@ let audioCaptureState = {
     processList: []
 };
 
+// Screen share state
+let screenShareStream = null;
+let screenSharePublication = null;
+let screenShareAudioPublication = null;
+let selectedScreenSourceId = null;
+
 async function loadProcessList() {
     try {
         const processes = await window.audioCapture?.getProcessList?.() ||
@@ -356,7 +362,142 @@ function getQualityPreset(qualityKey) {
 }
 
 /**
- * Attempt screen share with automatic fallback on failure
+ * Get screen/window sources via Electron desktopCapturer
+ * Falls back to getDisplayMedia for browser environments
+ */
+async function getScreenSources() {
+    // In Electron: use desktopCapturer via preload
+    if (window.electronAPI && window.electronAPI.getSources) {
+        return await window.electronAPI.getSources();
+    }
+    return [];
+}
+
+/**
+ * Show the source picker modal and resolve with the selected source
+ * @returns {Promise<{id: string, name: string}|null>} Selected source or null if cancelled
+ */
+function showSourcePicker() {
+    return new Promise((resolve) => {
+        const modal = document.getElementById('source-picker-modal');
+        const grid = document.getElementById('source-picker-grid');
+        const closeBtn = document.getElementById('source-picker-close');
+        const cancelBtn = document.getElementById('source-picker-cancel');
+        const tabs = document.querySelectorAll('.source-tab');
+        let allSources = [];
+        let currentTab = 'screen';
+
+        if (!modal || !grid) { resolve(null); return; }
+
+        let resolved = false;
+        const done = (source) => {
+            if (resolved) return;
+            resolved = true;
+            modal.classList.add('hidden');
+            resolve(source);
+        };
+
+        const render = () => {
+            grid.innerHTML = '<div class="loading-sources">Carregando fontes...</div>';
+            const filtered = allSources.filter(s => {
+                if (currentTab === 'screen') return s.id && typeof s.id === 'string' && s.id.startsWith('screen');
+                return s.id && typeof s.id === 'string' && s.id.startsWith('window');
+            });
+
+            if (filtered.length === 0) {
+                grid.innerHTML = '<div class="loading-sources">Nenhuma fonte disponível.</div>';
+                return;
+            }
+
+            grid.innerHTML = '';
+            filtered.forEach(source => {
+                const item = document.createElement('div');
+                item.className = 'source-item';
+
+                const img = document.createElement('img');
+                img.src = source.thumbnail || 'data:image/svg+xml;utf8,' + encodeURIComponent(
+                    '<svg xmlns="http://www.w3.org/2000/svg" width="300" height="150"><rect width="100%" height="100%" fill="%23232329"/><text x="50%" y="50%" text-anchor="middle" fill="%235865f2" font-size="40" font-family="sans-serif">🖥️</text></svg>'
+                );
+                img.alt = source.name;
+
+                const span = document.createElement('span');
+                span.textContent = source.name;
+                span.title = source.name;
+
+                item.appendChild(img);
+                item.appendChild(span);
+
+                item.addEventListener('click', () => {
+                    selectedScreenSourceId = source.id;
+                    done(source);
+                });
+
+                grid.appendChild(item);
+            });
+        };
+
+        // Close handlers
+        closeBtn.addEventListener('click', () => done(null));
+        cancelBtn.addEventListener('click', () => done(null));
+        modal.addEventListener('click', (e) => {
+            if (e.target === modal) done(null);
+        });
+
+        // Tab switching
+        tabs.forEach(tab => {
+            tab.addEventListener('click', () => {
+                tabs.forEach(t => t.classList.remove('active'));
+                tab.classList.add('active');
+                currentTab = tab.dataset.type;
+                render();
+            });
+        });
+
+        modal.classList.remove('hidden');
+
+        // Load sources
+        getScreenSources().then(sources => {
+            allSources = sources;
+            render();
+        }).catch(err => {
+            console.error('[SourcePicker] Falha ao carregar fontes:', err);
+            grid.innerHTML = '<div class="loading-sources">Erro ao carregar fontes: ' + err.message + '</div>';
+        });
+    });
+}
+
+/**
+ * Capture a screen/window source via getUserMedia (Electron desktopCapturer)
+ * @param {string} sourceId - Electron source ID (e.g. "screen:0:0" or "window:123:0")
+ * @param {object} preset - Quality preset with width/height/frameRate
+ * @returns {Promise<MediaStream>} Captured stream
+ */
+async function captureScreenStream(sourceId, preset) {
+    const width = preset.width;
+    const height = preset.height;
+    const frameRate = preset.frameRate;
+
+    // Electron: use desktopCapturer source ID
+    const constraints = {
+        audio: false,
+        video: {
+            mandatory: {
+                chromeMediaSource: 'desktop',
+                chromeMediaSourceId: sourceId,
+                maxWidth: width,
+                maxHeight: height,
+                maxFrameRate: frameRate,
+                minFrameRate: Math.min(frameRate, 30),
+            }
+        }
+    };
+
+    return navigator.mediaDevices.getUserMedia(constraints);
+}
+
+/**
+ * Attempt screen share with automatic fallback on failure.
+ * Uses Electron desktopCapturer + getUserMedia instead of getDisplayMedia.
  * @param {string} qualityKey - Initial quality to try
  * @param {MediaStreamTrack|null} audioTrack - Optional audio track
  * @returns {Promise<{success: boolean, qualityUsed: string, error?: Error}>}
@@ -364,44 +505,86 @@ function getQualityPreset(qualityKey) {
 async function shareScreenWithFallback(qualityKey, audioTrack) {
     const fallbackChain = [qualityKey, ...QUALITY_FALLBACK_CHAIN[qualityKey] || []];
     let lastError = null;
-    
+
+    // In Electron, we need to pick a source first
+    let sourceId = selectedScreenSourceId;
+    if (!sourceId) {
+        const source = await showSourcePicker();
+        if (!source) {
+            return { success: false, qualityUsed: qualityKey, error: new Error('Nenhuma fonte selecionada') };
+        }
+        sourceId = source.id;
+        selectedScreenSourceId = sourceId;
+    }
+
     for (const attemptQuality of fallbackChain) {
         const preset = getQualityPreset(attemptQuality);
-        
+
         try {
             console.log(`[Share] Tentando qualidade: ${attemptQuality} (${preset.width}x${preset.height} @ ${preset.frameRate}fps)`);
-            
-            const shareOptions = {
-                audio: audioTrack ? { track: audioTrack } : false,
-                // Resolution constraints for getDisplayMedia
-                resolution: {
-                    width: preset.width,
-                    height: preset.height,
-                    frameRate: preset.frameRate
-                },
-                // Video encoding parameters for LiveKit/WebRTC
-                videoEncoding: preset.encoding
-            };
-            
-            await myRoom.localParticipant.setScreenShareEnabled(true, shareOptions);
-            
+
+            // 1. Capture the screen/window stream
+            const stream = await captureScreenStream(sourceId, preset);
+            screenShareStream = stream;
+
+            // 2. Add audio track if available
+            if (audioTrack && !stream.getAudioTracks().length) {
+                stream.addTrack(audioTrack);
+            }
+
+            // 3. Publish video track to LiveKit
+            const videoTrack = stream.getVideoTracks()[0];
+            if (!videoTrack) {
+                throw new Error('Nenhum track de vídeo capturado');
+            }
+
+            screenSharePublication = await myRoom.localParticipant.publishTrack(videoTrack, {
+                source: LivekitClient.Track.Source.ScreenShare,
+                name: `screen-${attemptQuality}`,
+                videoEncoding: preset.encoding,
+                dtx: true,
+            });
+
+            // 4. Publish audio track separately (as microphone-like track)
+            const audio = stream.getAudioTracks()[0];
+            if (audio) {
+                screenShareAudioPublication = await myRoom.localParticipant.publishTrack(audio, {
+                    source: LivekitClient.Track.Source.Microphone,
+                    name: 'screen-audio',
+                });
+            }
+
             console.log(`[Share] Sucesso com qualidade: ${attemptQuality}`);
             return { success: true, qualityUsed: attemptQuality };
-            
+
         } catch (err) {
             lastError = err;
             console.warn(`[Share] Falha com ${attemptQuality}:`, err.message);
-            
+
+            // Clean up failed stream
+            if (screenShareStream) {
+                screenShareStream.getTracks().forEach(t => t.stop());
+                screenShareStream = null;
+            }
+            if (screenSharePublication) {
+                try { await myRoom.localParticipant.unpublishTrack(screenSharePublication.track); } catch (e) {}
+                screenSharePublication = null;
+            }
+            if (screenShareAudioPublication) {
+                try { await myRoom.localParticipant.unpublishTrack(screenShareAudioPublication.track); } catch (e) {}
+                screenShareAudioPublication = null;
+            }
+
             // If this was the last fallback, break
             if (attemptQuality === fallbackChain[fallbackChain.length - 1]) {
                 break;
             }
-            
+
             // Brief delay before retry
             await new Promise(r => setTimeout(r, 300));
         }
     }
-    
+
     return { success: false, qualityUsed: qualityKey, error: lastError };
 }
 
@@ -409,8 +592,22 @@ async function stopScreenShare() {
     if (!myRoom) return;
     
     try {
-        await myRoom.localParticipant.setScreenShareEnabled(false);
+        // Unpublish manually published screen share tracks
+        if (screenSharePublication) {
+            await myRoom.localParticipant.unpublishTrack(screenSharePublication.track);
+            screenSharePublication = null;
+        }
+        if (screenShareAudioPublication) {
+            await myRoom.localParticipant.unpublishTrack(screenShareAudioPublication.track);
+            screenShareAudioPublication = null;
+        }
+        
         await stopAudioCapture();
+        
+        if (screenShareStream) {
+            screenShareStream.getTracks().forEach(t => t.stop());
+            screenShareStream = null;
+        }
         
         btnStop.classList.add('hidden');
         if (btnShare) btnShare.classList.remove('hidden');
@@ -661,6 +858,13 @@ if (btnLeave) {
 function disconnectRoom() {
   stopAudioCapture().catch(console.error);
   activeSubscribedSids.clear();
+  if (screenShareStream) {
+    screenShareStream.getTracks().forEach(t => t.stop());
+    screenShareStream = null;
+  }
+  screenSharePublication = null;
+  screenShareAudioPublication = null;
+  selectedScreenSourceId = null;
   if (myRoom) {
     myRoom.disconnect();
     myRoom = null;
