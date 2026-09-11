@@ -51,6 +51,25 @@ const DEFAULT_AVATAR = 'data:image/svg+xml;utf8,' + encodeURIComponent(
 
 if (avatarPreview) avatarPreview.src = DEFAULT_AVATAR;
 
+// ─── Avatar dos participantes ───────────────────────────
+// O /api/get-token grava { avatar } no metadata do participante.
+function getParticipantAvatar(participant) {
+  let avatar = '';
+  try {
+    const meta = participant && participant.metadata ? JSON.parse(participant.metadata) : null;
+    if (meta && meta.avatar) avatar = meta.avatar;
+  } catch (e) { /* metadata inválida — usa default */ }
+  return avatar || DEFAULT_AVATAR;
+}
+
+function createParticipantAvatar(participant, cls) {
+  const img = document.createElement('img');
+  img.className = cls || 'participant-avatar';
+  img.src = getParticipantAvatar(participant);
+  img.alt = '';
+  return img;
+}
+
 if (avatarInput) {
   avatarInput.addEventListener('change', (e) => {
     const file = e.target.files[0];
@@ -223,6 +242,12 @@ async function stopAudioCapture() {
         audioTrack.stop();
         audioTrack = null;
     }
+
+    if (audioWorkletNode) {
+        try { audioWorkletNode.port.postMessage('stop'); } catch (e) {}
+        try { audioWorkletNode.disconnect(); } catch (e) {}
+        audioWorkletNode = null;
+    }
     
     if (oscillatorRef) {
         oscillatorRef.stop();
@@ -239,11 +264,11 @@ function setupAudioCallback() {
     // Register callback for native audio data
     if (window.audioCapture && window.audioCapture.onAudioData) {
         window.audioCapture.onAudioData((audioData) => {
-            // audioData is Float32Array
+            // audioData is Float32Array (interleaved samples)
             if (audioWorkletNode && audioWorkletNode.port) {
                 audioWorkletNode.port.postMessage({
                     type: 'audioData',
-                    data: audioData
+                    buffer: audioData
                 });
             }
         });
@@ -254,14 +279,25 @@ async function createAudioTrackFromNative() {
     audioContextRef = new AudioContext({ sampleRate: 48000 });
     const destination = audioContextRef.createMediaStreamDestination();
 
-    const oscillator = audioContextRef.createOscillator();
-    oscillator.type = 'sine';
-    oscillator.frequency.value = 440;
-    const gain = audioContextRef.createGain();
-    gain.gain.value = 0;
-    oscillator.connect(gain).connect(destination);
-    oscillator.start();
-    oscillatorRef = oscillator;
+    // Load the PCM worklet that consumes the native audio callback data
+    try {
+        const workletUrl = new URL('audio-worklet.js', window.location.href).href;
+        await audioContextRef.audioWorklet.addModule(workletUrl);
+    } catch (err) {
+        console.warn('Falha ao carregar audio-worklet:', err);
+    }
+
+    try {
+        audioWorkletNode = new AudioWorkletNode(audioContextRef, 'pcm-processor', {
+            processorOptions: { sampleRate: 48000 },
+            channelCount: 2,
+            channelCountMode: 'explicit'
+        });
+        audioWorkletNode.connect(destination);
+    } catch (err) {
+        console.warn('Falha ao criar AudioWorkletNode:', err);
+        audioWorkletNode = null;
+    }
 
     const tracks = destination.stream.getAudioTracks();
     return tracks[0] || null;
@@ -609,6 +645,9 @@ async function stopScreenShare() {
             screenShareStream = null;
         }
         
+        // Allow picking a different window/screen on the next share
+        selectedScreenSourceId = null;
+        
         btnStop.classList.add('hidden');
         if (btnShare) btnShare.classList.remove('hidden');
         
@@ -637,11 +676,18 @@ if (btnShare) {
         if (!myRoom) return;
         
         try {
-            // Start audio capture first
-            const audioResult = await startAudioCapture();
-            
             const qualityKey = qualitySelect ? qualitySelect.value : '720p30';
             
+            // Best-effort audio capture: audio failures must NOT block video sharing
+            let audioResult = { success: false, track: null };
+            let audioError = null;
+            try {
+                audioResult = await startAudioCapture();
+            } catch (err) {
+                audioError = err;
+                console.warn('[Share] Áudio indisponível, continuando sem áudio:', err);
+            }
+
             // Use fallback mechanism
             const result = await shareScreenWithFallback(qualityKey, audioResult.track || null);
             
@@ -659,7 +705,10 @@ if (btnShare) {
                 
                 // Show notification if fallback was used
                 if (result.qualityUsed !== qualityKey) {
-                    showLoginError(`Qualidade ajustada automaticamente para ${result.qualityUsed}`);
+                    showRoomError(`Qualidade ajustada automaticamente para ${result.qualityUsed}`);
+                }
+                if (audioError) {
+                    showRoomError('⚠️ Áudio indisponível (' + (audioError.message || 'erro').split('\n')[0] + '). A transmissão segue sem som.');
                 }
             } else {
                 throw result.error || new Error('Falha ao iniciar compartilhamento');
@@ -667,7 +716,23 @@ if (btnShare) {
             
         } catch (err) {
             console.error('Erro ao compartilhar tela com áudio:', err);
-            showLoginError('Erro ao iniciar compartilhamento: ' + err.message);
+            showRoomError('Erro ao iniciar compartilhamento: ' + err.message.split('\n')[0]);
+            // Clean up: release any capture that may have started, and force the
+            // source picker to re-open on the next attempt.
+            try { await stopAudioCapture(); } catch (e) {}
+            selectedScreenSourceId = null;
+            btnStop.classList.add('hidden');
+            if (btnShare) btnShare.classList.remove('hidden');
+        }
+    });
+}
+
+if (btnStop) {
+    btnStop.addEventListener('click', async () => {
+        try {
+            await stopScreenShare();
+        } catch (err) {
+            console.error('Erro ao parar compartilhamento:', err);
         }
     });
 }
@@ -762,7 +827,14 @@ function renderTrack(track, participant) {
 
     const tag = document.createElement('div');
     tag.className = 'stream-owner-tag';
-    tag.textContent = participant.identity;
+
+    const avatarImg = createParticipantAvatar(participant, 'stream-owner-avatar');
+    tag.appendChild(avatarImg);
+
+    const tagName = document.createElement('span');
+    tagName.textContent = participant.identity;
+    tag.appendChild(tagName);
+
     wrapper.appendChild(tag);
 
     const overlay = document.createElement('div');
@@ -883,10 +955,17 @@ function updateParticipantsUI() {
   if (myRoom.localParticipant) {
     totalOnline++;
     const li = document.createElement('li');
+
+    const info = document.createElement('span');
+    info.className = 'participant-info';
+    info.appendChild(createParticipantAvatar(myRoom.localParticipant));
+
     const nameSpan = document.createElement('span');
     nameSpan.className = 'participant-name-text';
     nameSpan.textContent = `${myRoom.localParticipant.identity} (Você)`;
-    li.appendChild(nameSpan);
+    info.appendChild(nameSpan);
+
+    li.appendChild(info);
     partList.appendChild(li);
   }
 
@@ -896,10 +975,16 @@ function updateParticipantsUI() {
       totalOnline++;
       const li = document.createElement('li');
 
+      const info = document.createElement('span');
+      info.className = 'participant-info';
+      info.appendChild(createParticipantAvatar(participant));
+
       const nameSpan = document.createElement('span');
       nameSpan.className = 'participant-name-text';
       nameSpan.textContent = participant.identity;
-      li.appendChild(nameSpan);
+      info.appendChild(nameSpan);
+
+      li.appendChild(info);
 
       let hasScreenShare = false;
       participant.videoTrackPublications.forEach((pub) => {
@@ -957,6 +1042,18 @@ function showLoginError(msg) {
   if (loginError) {
     loginError.textContent = msg;
     setTimeout(() => { loginError.textContent = ''; }, 4000);
+  }
+}
+
+function showRoomError(msg) {
+  const el = document.getElementById('room-error');
+  if (el) {
+    el.textContent = msg;
+    el.classList.remove('hidden');
+    clearTimeout(showRoomError._timer);
+    showRoomError._timer = setTimeout(() => el.classList.add('hidden'), 6000);
+  } else {
+    showLoginError(msg);
   }
 }
 
