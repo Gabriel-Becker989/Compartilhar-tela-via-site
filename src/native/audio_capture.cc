@@ -1,24 +1,122 @@
 #include "audio_capture.h"
 #include <napi.h>
 #include <windows.h>
+#include <tlhelp32.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 #include <audiopolicy.h>
 #include <avrt.h>
 #include <psapi.h>
+#include <mmreg.h>
+#include <ksmedia.h>
 #include <vector>
 #include <string>
 #include <algorithm>
 #include <cmath>
 
+// Windows 11 24H2+ process-loopback activation API (audioclientactivationparams.h).
+#if defined(__has_include) && __has_include(<audioclientactivationparams.h>)
+#include <audioclientactivationparams.h>
+#else
+enum AUDIOCLIENT_ACTIVATION_TYPE {
+    AUDIOCLIENT_ACTIVATION_TYPE_DEFAULT = 0,
+    AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK = 1
+};
+enum PROCESS_LOOPBACK_MODE {
+    PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE = 0,
+    PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE = 1
+};
+struct AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
+    DWORD TargetProcessId;
+    PROCESS_LOOPBACK_MODE ProcessLoopbackMode;
+};
+struct AUDIOCLIENT_ACTIVATION_PARAMS {
+    AUDIOCLIENT_ACTIVATION_TYPE ActivationType;
+    union {
+        AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS ProcessLoopbackParams;
+    };
+};
+#endif
+
+#ifndef VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK
+#define VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK L"AUDIO\\VIRTUAL\\DEVICE\\PROCESS_LOOPBACK"
+#endif
+
+std::string FormatHr(HRESULT hr) {
+    char buf[16];
+    snprintf(buf, sizeof(buf), "0x%08X", static_cast<unsigned>(hr));
+    return std::string(buf);
+}
+
 // Global instance
 WasapiLoopbackCapture* g_captureInstance = nullptr;
+
+// ============================================================================
+// Async activation handler for the process-loopback (per-process) capture.
+// ActivateAudioInterfaceAsync invokes ActivateCompleted on an MTA worker thread;
+// we wait on a manual-reset event so the caller can synchronously consume the
+// resulting IAudioClient.
+// ============================================================================
+class ActivationHandler : public IActivateAudioInterfaceCompletionHandler, public IAgileObject {
+public:
+    ActivationHandler() {
+        doneEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    }
+    virtual ~ActivationHandler() {
+        if (doneEvent_) { CloseHandle(doneEvent_); doneEvent_ = nullptr; }
+    }
+
+    // IUnknown
+    STDMETHODIMP QueryInterface(REFIID riid, void** ppvObj) override {
+        if (!ppvObj) return E_POINTER;
+        *ppvObj = nullptr;
+        if (riid == IID_IUnknown || riid == __uuidof(IActivateAudioInterfaceCompletionHandler)) {
+            *ppvObj = static_cast<IActivateAudioInterfaceCompletionHandler*>(this);
+        } else if (riid == IID_IAgileObject) {
+            // Windows may marshal this interface across apartments; advertise
+            // agility (as the official sample does) to avoid activation errors.
+            *ppvObj = static_cast<IAgileObject*>(this);
+        } else {
+            return E_NOINTERFACE;
+        }
+        AddRef();
+        return S_OK;
+    }
+    STDMETHODIMP_(ULONG) AddRef() override { return InterlockedIncrement(&refCount_); }
+    // NOTE: this object is owned by VALUE by WasapiLoopbackCapture — Windows
+    // manages its own references around the async activation; we must NEVER
+    // delete it from Release() (that would double-free once Windows releases).
+    STDMETHODIMP_(ULONG) Release() override { return InterlockedDecrement(&refCount_); }
+
+    // IActivateAudioInterfaceCompletionHandler
+    STDMETHODIMP ActivateCompleted(IActivateAudioInterfaceAsyncOperation* operation) override {
+        IUnknown* activatedInterface = nullptr;
+        hr_ = operation->GetActivateResult(&hr_, &activatedInterface);
+        if (SUCCEEDED(hr_) && activatedInterface) {
+            hr_ = activatedInterface->QueryInterface(__uuidof(IAudioClient), reinterpret_cast<void**>(&audioClient_));
+            activatedInterface->Release();
+        }
+        if (doneEvent_) SetEvent(doneEvent_);
+        return S_OK;
+    }
+
+    HRESULT Result() const { return hr_; }
+    IAudioClient* Client() const { return audioClient_; }
+    HANDLE DoneEvent() const { return doneEvent_; }
+
+private:
+    volatile LONG refCount_ = 1;
+    HRESULT hr_ = E_FAIL;
+    IAudioClient* audioClient_ = nullptr;
+    HANDLE doneEvent_ = nullptr;
+};
 
 // ============================================================================
 // WasapiLoopbackCapture Implementation
 // ============================================================================
 
-WasapiLoopbackCapture::WasapiLoopbackCapture() {
+WasapiLoopbackCapture::WasapiLoopbackCapture()
+    : activationHandler_(new ActivationHandler()) {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 }
 
@@ -30,7 +128,12 @@ WasapiLoopbackCapture::~WasapiLoopbackCapture() {
         mixFormat_ = nullptr;
     }
     
-    if (targetSession_) targetSession_->Release();
+    if (sampleReadyEvent_) {
+        CloseHandle(sampleReadyEvent_);
+        sampleReadyEvent_ = nullptr;
+    }
+    delete activationHandler_;
+    activationHandler_ = nullptr;
     if (captureClient_) captureClient_->Release();
     if (audioClient_) audioClient_->Release();
     if (renderDevice_) renderDevice_->Release();
@@ -60,183 +163,193 @@ HRESULT WasapiLoopbackCapture::Initialize(const AudioCaptureConfig& config) {
         return hr;
     }
     
-    // Activate audio client
-    hr = renderDevice_->Activate(
-        __uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void**)&audioClient_
-    );
-    if (FAILED(hr)) {
-        lastError_ = "Failed to activate audio client";
-        return hr;
+    // Activate the appropriate audio client (system loopback or per-process)
+    if (config.processId != 0) {
+        // Per-process capture (Windows 11 24H2+): use the process-loopback
+        // virtual device so ONLY the target process (and its children) audio
+        // is captured — not the whole system mix.
+        hr = InitializeProcessLoopbackClient(config.processId, config.includeProcessTree);
+        if (FAILED(hr)) {
+            lastError_ = "Failed to activate process loopback for PID " +
+                         std::to_string(config.processId) + ": " + lastError_;
+            return hr;
+        }
+    } else {
+        hr = renderDevice_->Activate(
+            __uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void**)&audioClient_
+        );
+        if (FAILED(hr)) {
+            lastError_ = "Failed to activate audio client";
+            return hr;
+        }
     }
     
-    // Get mix format
-    hr = audioClient_->GetMixFormat(&mixFormat_);
-    if (FAILED(hr)) {
-        lastError_ = "Failed to get mix format";
-        return hr;
+    // Get mix format — except for per-process loopback, whose capture client
+    // does not reliably expose one (GetMixFormat can fail / return null) and
+    // rejects float32; the official sample builds the format explicitly.
+    if (config.processId != 0) {
+        // The per-process virtual device only accepts PCM16 here
+        // (float32 -> E_INVALIDARG). ConvertToFloat() later turns it to float32
+        // for the JS/WebAudio consumer.
+        WAVEFORMATEX* wf = reinterpret_cast<WAVEFORMATEX*>(
+            CoTaskMemAlloc(sizeof(WAVEFORMATEX)));
+        if (!wf) {
+            lastError_ = "Failed to allocate capture format";
+            return E_OUTOFMEMORY;
+        }
+        wf->wFormatTag = WAVE_FORMAT_PCM;
+        wf->nChannels = config.channels > 0 ? config.channels : 2;
+        wf->nSamplesPerSec = config.sampleRate > 0 ? config.sampleRate : 48000;
+        wf->wBitsPerSample = 16;
+        wf->nBlockAlign = (wf->nChannels * 16) / 8;
+        wf->nAvgBytesPerSec = wf->nSamplesPerSec * wf->nBlockAlign;
+        wf->cbSize = 0;
+        mixFormat_ = wf;
+    } else {
+        hr = audioClient_->GetMixFormat(&mixFormat_);
+        if (FAILED(hr)) {
+            lastError_ = "Failed to get mix format";
+            return hr;
+        }
     }
     
-    // Override with our desired format if needed
-    if (config.sampleRate > 0 && config.channels > 0) {
-        WAVEFORMATEXTENSIBLE* extensible = reinterpret_cast<WAVEFORMATEXTENSIBLE*>(mixFormat_);
-        extensible->Format.nSamplesPerSec = config.sampleRate;
-        extensible->Format.nChannels = config.channels;
-        extensible->Format.nBlockAlign = (config.channels * config.bitDepth) / 8;
-        extensible->Format.nAvgBytesPerSec = extensible->Format.nSamplesPerSec * extensible->Format.nBlockAlign;
-        extensible->Format.wBitsPerSample = config.bitDepth;
-        extensible->Format.cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
-        extensible->SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
-        extensible->dwChannelMask = (config.channels == 2) ? (SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT) : SPEAKER_MONO;
-    }
-    
-    // Find target audio session by PID
-    hr = FindTargetAudioSession();
-    if (FAILED(hr)) {
-        lastError_ = "Failed to find audio session for PID " + std::to_string(config.processId);
-        return hr;
+    // Override the mix format so the capture is 48000 Hz / stereo / float32 —
+    // the exact format the JS/WebAudio consumer expects. The previous renderer
+    // crash was caused by the TIME_CRITICAL capture thread, not this override.
+    // NOTE: the per-process virtual device can return a plain WAVEFORMATEX
+    // (not EXTENSIBLE); only write the EXTENSIBLE fields when the allocation
+    // actually is one, otherwise we overflow the CoTaskMem'd block.
+    if (config.processId == 0 && config.sampleRate > 0 && config.channels > 0) {
+        if (mixFormat_->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
+            WAVEFORMATEXTENSIBLE* extensible = reinterpret_cast<WAVEFORMATEXTENSIBLE*>(mixFormat_);
+            extensible->Format.nSamplesPerSec = config.sampleRate;
+            extensible->Format.nChannels = config.channels;
+            extensible->Format.nBlockAlign = (config.channels * config.bitDepth) / 8;
+            extensible->Format.nAvgBytesPerSec = extensible->Format.nSamplesPerSec * extensible->Format.nBlockAlign;
+            extensible->Format.wBitsPerSample = config.bitDepth;
+            extensible->Format.cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
+            extensible->SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+            extensible->dwChannelMask = (config.channels == 2) ? (SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT) : SPEAKER_FRONT_CENTER;
+        } else {
+            mixFormat_->wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
+            mixFormat_->nSamplesPerSec = config.sampleRate;
+            mixFormat_->nChannels = config.channels;
+            mixFormat_->wBitsPerSample = config.bitDepth;
+            mixFormat_->nBlockAlign = (config.channels * config.bitDepth) / 8;
+            mixFormat_->nAvgBytesPerSec = mixFormat_->nSamplesPerSec * mixFormat_->nBlockAlign;
+        }
     }
     
     // Initialize audio client for loopback capture
+    std::string initDetail;
     hr = InitializeAudioClient();
     if (FAILED(hr)) {
-        lastError_ = "Failed to initialize audio client for loopback";
+        initDetail = lastError_;
+        lastError_ = "Failed to initialize audio client for loopback: " + initDetail;
         return hr;
     }
     
     return S_OK;
 }
 
-HRESULT WasapiLoopbackCapture::FindTargetAudioSession() {
-    // Get audio session manager
-    IAudioSessionManager2* sessionManager = nullptr;
-    HRESULT hr = renderDevice_->Activate(
-        __uuidof(IAudioSessionManager2), CLSCTX_ALL, nullptr, (void**)&sessionManager
-    );
-    if (FAILED(hr)) {
-        lastError_ = "Failed to activate session manager";
-        return hr;
-    }
+HRESULT WasapiLoopbackCapture::InitializeProcessLoopbackClient(DWORD processId, bool includeTree) {
+    // Keep the activation params (including the BLOB pointing at them) alive
+    // for the WHOLE async operation, and run the activation from a dedicated
+    // thread with its own COM apartment to avoid interfering with (or relying
+    // on) the Electron/Node main loop.
+    struct ActivationJob {
+        AUDIOCLIENT_ACTIVATION_PARAMS params{};
+        PROPVARIANT activateParams{};
+        ActivationHandler* handler = nullptr;
+        HRESULT hr = E_FAIL;
+    };
+    ActivationJob job;
+    job.handler = activationHandler_;
+    job.params.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
+    job.params.ProcessLoopbackParams.TargetProcessId = processId;
+    job.params.ProcessLoopbackParams.ProcessLoopbackMode =
+        includeTree ? PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE
+                    : PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE;
+    PropVariantInit(&job.activateParams);
+    job.activateParams.vt = VT_BLOB;
+    job.activateParams.blob.cbSize = sizeof(job.params);
+    // PropVariantClear() frees BLOB data with CoTaskMemFree() — the blob bytes
+    // MUST live in CoTaskMem, not on the stack, or we free a stack pointer.
+    job.activateParams.blob.pBlobData =
+        reinterpret_cast<BYTE*>(CoTaskMemAlloc(sizeof(job.params)));
+    memcpy(job.activateParams.blob.pBlobData, &job.params, sizeof(job.params));
     
-    // Get session enumerator
-    IAudioSessionEnumerator* sessionEnumerator = nullptr;
-    hr = sessionManager->GetSessionEnumerator(&sessionEnumerator);
-    if (FAILED(hr)) {
-        sessionManager->Release();
-        lastError_ = "Failed to get session enumerator";
-        return hr;
-    }
-    
-    int count = 0;
-    hr = sessionEnumerator->GetCount(&count);
-    if (FAILED(hr)) {
-        sessionEnumerator->Release();
-        sessionManager->Release();
-        lastError_ = "Failed to get session count";
-        return hr;
-    }
-    
-    // Enumerate sessions to find matching PID
-    for (int i = 0; i < count; ++i) {
-        IAudioSessionControl* sessionControl = nullptr;
-        hr = sessionEnumerator->GetSession(i, &sessionControl);
-        if (FAILED(hr)) continue;
-        
-        IAudioSessionControl2* sessionControl2 = nullptr;
-        hr = sessionControl->QueryInterface(__uuidof(IAudioSessionControl2), (void**)&sessionControl2);
-        sessionControl->Release();
-        if (FAILED(hr)) continue;
-        
-        DWORD sessionPid = 0;
-        hr = sessionControl2->GetProcessId(&sessionPid);
-        if (FAILED(hr)) {
-            sessionControl2->Release();
-            continue;
-        }
-        
-        // Check if this PID matches our target (or is in tree)
-        bool matches = false;
-        if (sessionPid == config_.processId) {
-            matches = true;
-        } else if (config_.includeProcessTree) {
-            matches = IsPidInTree(sessionPid, config_.processId);
-        }
-        
-        if (matches) {
-            // Found matching session
-            targetSession_ = sessionControl2;
-            sessionEnumerator->Release();
-            sessionManager->Release();
-            return S_OK;
-        }
-        
-        sessionControl2->Release();
-    }
-    
-    sessionEnumerator->Release();
-    sessionManager->Release();
-    lastError_ = "No audio session found for PID " + std::to_string(config_.processId);
-    return E_NOTFOUND;
-}
-
-bool WasapiLoopbackCapture::IsPidInTree(DWORD pid, DWORD targetPid) {
-    if (pid == targetPid) return true;
-    
-    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (hSnapshot == INVALID_HANDLE_VALUE) return false;
-    
-    PROCESSENTRY32W pe32;
-    pe32.dwSize = sizeof(PROCESSENTRY32W);
-    
-    bool found = false;
-    if (Process32FirstW(hSnapshot, &pe32)) {
-        do {
-            if (pe32.th32ProcessID == pid) {
-                // Found the process, now check parent chain
-                DWORD currentPid = pid;
-                while (currentPid != 0 && currentPid != targetPid) {
-                    bool parentFound = false;
-                    HANDLE hSnap2 = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-                    if (hSnap2 != INVALID_HANDLE_VALUE) {
-                        PROCESSENTRY32W pe32_2;
-                        pe32_2.dwSize = sizeof(PROCESSENTRY32W);
-                        if (Process32FirstW(hSnap2, &pe32_2)) {
-                            do {
-                                if (pe32_2.th32ProcessID == currentPid) {
-                                    currentPid = pe32_2.th32ParentProcessID;
-                                    parentFound = true;
-                                    break;
-                                }
-                            } while (Process32NextW(hSnap2, &pe32_2));
-                        }
-                        CloseHandle(hSnap2);
-                    }
-                    if (!parentFound) break;
-                }
-                found = (currentPid == targetPid);
-                break;
+    std::thread activationThread([&job]() {
+        CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        IActivateAudioInterfaceAsyncOperation* asyncOp = nullptr;
+        job.hr = ActivateAudioInterfaceAsync(
+            VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
+            __uuidof(IAudioClient),
+            &job.activateParams,
+            job.handler,
+            &asyncOp
+        );
+        if (SUCCEEDED(job.hr) && asyncOp) {
+            // Completion callback fires on the OS' MTA worker thread; wait for it.
+            if (job.handler->DoneEvent()) {
+                WaitForSingleObject(job.handler->DoneEvent(), 8000);
             }
-        } while (Process32NextW(hSnapshot, &pe32));
+            asyncOp->Release();
+        }
+        PropVariantClear(&job.activateParams);
+        CoUninitialize();
+    });
+    activationThread.join();
+    
+    HRESULT hr = job.handler->Result();
+    audioClient_ = job.handler->Client();
+    
+    if (job.hr != S_OK) hr = job.hr;
+    
+    if (FAILED(hr)) {
+        lastError_ = "activation failed " + FormatHr(hr);
+        return hr;
+    }
+    if (!audioClient_) {
+        lastError_ = "activation returned no client";
+        return E_FAIL;
     }
     
-    CloseHandle(hSnapshot);
-    return found;
+    return S_OK;
 }
 
 HRESULT WasapiLoopbackCapture::InitializeAudioClient() {
     // Initialize for loopback capture
-    REFERENCE_TIME hnsRequestedDuration = REFTIMES_PER_MILLISEC * config_.bufferDurationMs;
+    REFERENCE_TIME hnsRequestedDuration = 10000LL * config_.bufferDurationMs;
     
-    HRESULT hr = audioClient_->Initialize(
-        AUDCLNT_SHAREMODE_SHARED,
-        AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-        hnsRequestedDuration,
-        0,
-        mixFormat_,
-        nullptr
-    );
+    HRESULT hr = S_OK;
+    
+    if (config_.processId != 0) {
+        // Per-process loopback: the virtual device only accepts PCM16 with
+        // AUTOCONVERTPCM + the high-quality resampler, engine-default period.
+        hr = audioClient_->Initialize(
+            AUDCLNT_SHAREMODE_SHARED,
+            AUDCLNT_STREAMFLAGS_LOOPBACK |
+                AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
+                AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+            0,
+            0,
+            mixFormat_,
+            nullptr
+        );
+    } else {
+        hr = audioClient_->Initialize(
+            AUDCLNT_SHAREMODE_SHARED,
+            AUDCLNT_STREAMFLAGS_LOOPBACK,
+            hnsRequestedDuration,
+            0,
+            mixFormat_,
+            nullptr
+        );
+    }
     
     if (FAILED(hr)) {
-        lastError_ = "Failed to initialize audio client: " + std::to_string(hr);
+        lastError_ = "Failed to initialize audio client " + FormatHr(hr);
         return hr;
     }
     
@@ -259,7 +372,7 @@ HRESULT WasapiLoopbackCapture::InitializeAudioClient() {
 
 HRESULT WasapiLoopbackCapture::Start() {
     if (isCapturing_.load()) return S_OK;
-    if (!audioClient_ || !captureClient_ || !targetSession_) {
+    if (!audioClient_ || !captureClient_) {
         lastError_ = "Not initialized properly";
         return E_UNEXPECTED;
     }
@@ -270,7 +383,7 @@ HRESULT WasapiLoopbackCapture::Start() {
     // Start audio client
     HRESULT hr = audioClient_->Start();
     if (FAILED(hr)) {
-        lastError_ = "Failed to start audio client";
+        lastError_ = "Failed to start audio client " + FormatHr(hr);
         isCapturing_.store(false);
         return hr;
     }
@@ -279,11 +392,10 @@ HRESULT WasapiLoopbackCapture::Start() {
     processingActive_.store(true);
     processingThread_ = std::thread(&WasapiLoopbackCapture::ProcessingThread, this);
     
-    // Start capture thread
+    // Start capture thread (normal priority — a TIME_CRITICAL thread polling
+    // WASAPI loopback can starve the audio engine and crash other clients,
+    // e.g. Chromium's WebAudio renderer).
     captureThread_ = std::thread(&WasapiLoopbackCapture::CaptureThread, this);
-    
-    // Set thread priority for low latency
-    SetThreadPriority(captureThread_.native_handle(), THREAD_PRIORITY_TIME_CRITICAL);
     
     return S_OK;
 }
@@ -315,21 +427,25 @@ HRESULT WasapiLoopbackCapture::Stop() {
 }
 
 void WasapiLoopbackCapture::CaptureThread() {
-    HANDLE hTask = AvSetMmThreadCharacteristics(L"Audio", nullptr);
+    // Buffer sized for the FULL engine buffer. GetBuffer() may return any
+    // number of frames per packet (up to bufferFrameCount_), so we must be
+    // able to hold the worst case.
+    std::vector<BYTE> buffer(bufferFrameCount_ * mixFormat_->nBlockAlign);
     
-    const UINT32 framesPerPacket = bufferFrameCount_ / 4; // Process in smaller chunks
-    std::vector<BYTE> buffer(framesPerPacket * mixFormat_->nBlockAlign);
-    
+    const DWORD pollInterval = 4; // ms — avoid busy-loop starving other audio clients
     while (!shouldStop_.load()) {
         UINT32 packetLength = 0;
         BYTE* data = nullptr;
         DWORD flags = 0;
         UINT64 devicePosition = 0, qpcPosition = 0;
         
+        Sleep(pollInterval);
+        if (shouldStop_.load()) break;
+        
+        UINT32 framesPerPacket = 0;
         HRESULT hr = captureClient_->GetBuffer(&data, &framesPerPacket, &flags, &devicePosition, &qpcPosition);
         
         if (hr == AUDCLNT_S_BUFFER_EMPTY) {
-            Sleep(1);
             continue;
         }
         
@@ -341,11 +457,9 @@ void WasapiLoopbackCapture::CaptureThread() {
             // Silence - fill with zeros
             std::fill(buffer.begin(), buffer.end(), 0);
         } else {
-            // Copy data
+            // Copy data (buffer is sized for the worst case, so it always fits)
             size_t bytesToCopy = framesPerPacket * mixFormat_->nBlockAlign;
-            if (bytesToCopy <= buffer.size()) {
-                memcpy(buffer.data(), data, bytesToCopy);
-            }
+            memcpy(buffer.data(), data, bytesToCopy);
         }
         
         hr = captureClient_->ReleaseBuffer(framesPerPacket);
@@ -368,8 +482,6 @@ void WasapiLoopbackCapture::CaptureThread() {
             queueCond_.notify_one();
         }
     }
-    
-    if (hTask) AvRevertMmThreadCharacteristics(hTask);
 }
 
 void WasapiLoopbackCapture::ProcessingThread() {
@@ -402,31 +514,49 @@ void WasapiLoopbackCapture::ProcessingThread() {
 void WasapiLoopbackCapture::ConvertToFloat(const BYTE* source, float* dest, UINT32 frames, WAVEFORMATEX* format) {
     const int channels = format->nChannels;
     const int bitsPerSample = format->wBitsPerSample;
-    const int bytesPerSample = bitsPerSample / 8;
+    const UINT32 total = frames * channels;
     
-    if (bitsPerSample == 16 && format->wFormatTag == WAVE_FORMAT_PCM) {
+    // GetMixFormat always returns a WAVEFORMATEXTENSIBLE whose wFormatTag is
+    // WAVE_FORMAT_EXTENSIBLE (0xFFFE); the real encoding is in SubFormat.
+    GUID subtype = {0};
+    if (format->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
+        subtype = reinterpret_cast<WAVEFORMATEXTENSIBLE*>(format)->SubFormat;
+    }
+    const bool isFloat = (format->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) ||
+                         (format->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
+                          IsEqualGUID(subtype, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT));
+    
+    if (bitsPerSample == 32 && isFloat) {
+        // IEEE float32 — direct copy
+        memcpy(dest, source, total * sizeof(float));
+    } else if (bitsPerSample == 32) {
+        // 32-bit PCM integer
+        const int32_t* src = reinterpret_cast<const int32_t*>(source);
+        for (UINT32 i = 0; i < total; ++i) {
+            dest[i] = src[i] / 2147483648.0f;
+        }
+    } else if (bitsPerSample == 16) {
         const int16_t* src = reinterpret_cast<const int16_t*>(source);
-        for (UINT32 i = 0; i < frames * channels; ++i) {
+        for (UINT32 i = 0; i < total; ++i) {
             dest[i] = src[i] / 32768.0f;
         }
-    } else if (bitsPerSample == 32 && format->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
-        const float* src = reinterpret_cast<const float*>(source);
-        memcpy(dest, source, frames * channels * sizeof(float));
     } else if (bitsPerSample == 24) {
         // 24-bit packed
         const uint8_t* src = source;
-        for (UINT32 i = 0; i < frames * channels; ++i) {
+        for (UINT32 i = 0; i < total; ++i) {
             int32_t sample = (src[2] << 16) | (src[1] << 8) | src[0];
             if (sample & 0x800000) sample |= 0xFF000000; // Sign extend
             dest[i] = sample / 8388608.0f;
             src += 3;
         }
-    } else {
-        // Default fallback - treat as 16-bit
-        const int16_t* src = reinterpret_cast<const int16_t*>(source);
-        for (UINT32 i = 0; i < frames * channels; ++i) {
-            dest[i] = src[i] / 32768.0f;
+    } else if (bitsPerSample == 8) {
+        const uint8_t* src = source;
+        for (UINT32 i = 0; i < total; ++i) {
+            dest[i] = (src[i] - 128) / 128.0f;
         }
+    } else {
+        // Unknown format — output silence
+        memset(dest, 0, total * sizeof(float));
     }
 }
 
@@ -627,7 +757,29 @@ Napi::Value GetProcessList(const Napi::CallbackInfo& info) {
 }
 
 // Thread-safe callback storage
-static Napi::ThreadSafeFunction g_audioCallback;
+static void CallJsAudioData(Napi::Env env,
+                            Napi::Function jsCallback,
+                            void* /*context*/,
+                            std::vector<float>* data) {
+    if (data == nullptr) return;
+    if (env == nullptr) {
+        delete data;
+        return;
+    }
+
+    Napi::ArrayBuffer buffer = Napi::ArrayBuffer::New(env, data->size() * sizeof(float));
+    if (data->size() > 0) {
+        float* dest = static_cast<float*>(buffer.Data());
+        memcpy(dest, data->data(), data->size() * sizeof(float));
+    }
+
+    Napi::TypedArray typedArray = Napi::Float32Array::New(env, data->size(), buffer, 0);
+    jsCallback.Call({typedArray});
+    delete data;
+}
+
+using AudioDataTSFN = Napi::TypedThreadSafeFunction<void, std::vector<float>, CallJsAudioData>;
+static AudioDataTSFN g_audioCallback;
 
 Napi::Value SetAudioCallback(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
@@ -640,31 +792,19 @@ Napi::Value SetAudioCallback(const Napi::CallbackInfo& info) {
     Napi::Function callback = info[0].As<Napi::Function>();
     
     // Create thread-safe function
-    g_audioCallback = Napi::ThreadSafeFunction::New(
+    g_audioCallback = AudioDataTSFN::New(
         env,
         callback,
         "AudioDataCallback",
         0,  // unlimited queue
-        1,  // only 1 thread will call
-        [](Napi::Env) {},  // no finalizer needed
-        [](Napi::Env env, Napi::Function jsCallback, const std::vector<float>& data) {
-            // Create Float32Array from data
-            Napi::ArrayBuffer buffer = Napi::ArrayBuffer::New(env, data.size() * sizeof(float));
-            float* dest = static_cast<float*>(buffer.Data());
-            memcpy(dest, data.data(), data.size() * sizeof(float));
-            
-            Napi::TypedArray typedArray = Napi::Float32Array::New(env, data.size(), buffer, 0);
-            jsCallback.Call({typedArray});
-        }
+        1   // only 1 thread will call
     );
     
     // Set callback on capture instance
     if (g_captureInstance) {
         g_captureInstance->SetDataCallback([](const float* data, size_t frames, int channels, int sampleRate) {
-            std::vector<float> audioData(data, data + frames * channels);
-            
             // Call thread-safe function (non-blocking)
-            g_audioCallback.NonBlockingCall(audioData);
+            g_audioCallback.NonBlockingCall(new std::vector<float>(data, data + frames * channels));
         });
     }
     

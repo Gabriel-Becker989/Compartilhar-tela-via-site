@@ -7,7 +7,7 @@
     "start": "electron . --disable-gpu --disable-gpu-compositing --no-sandbox",
     "dev": "electron . --dev",
     "rebuild": "node-gyp rebuild",
-    "build:win": "npm install node-addon-api node-gyp --no-save && node-gyp rebuild && electron-builder --win",
+    "build:win": "node-gyp rebuild && electron-builder --win",
     "build:linux": "electron-builder --linux AppImage"
   },
   "dependencies": {
@@ -15,7 +15,9 @@
   },
   "devDependencies": {
     "electron": "^28.2.0",
-    "electron-builder": "^24.9.0"
+    "electron-builder": "^24.9.0",
+    "node-addon-api": "^8.9.2",
+    "node-gyp": "^12.3.0"
   },
   "build": {
     "appId": "com.screenshare.collab",
@@ -24,6 +26,9 @@
       "preload.js",
       "public/**/*",
       "build/Release/wasi_audio.node"
+    ],
+    "asarUnpack": [
+      "build/Release/*.node"
     ],
     "win": {
       "target": "nsis"

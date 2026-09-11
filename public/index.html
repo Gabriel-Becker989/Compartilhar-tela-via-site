@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Screen Share — LiveKit Cloud + WASAPI Audio</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' https: http: ws: wss:; worker-src 'self' blob:; child-src blob:;" />
   <link rel="stylesheet" href="style.css" />
   <script src="https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.min.js"></script>
 </head>
@@ -89,6 +90,7 @@
     </header>
 
     <main id="main-content">
+      <p id="room-error" class="room-error hidden"></p>
       <div id="video-grid" class="video-grid">
         <div id="empty-state" class="empty-state">
           <div class="empty-icon">📡</div>

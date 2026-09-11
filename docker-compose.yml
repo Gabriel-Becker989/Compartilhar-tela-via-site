@@ -1,0 +1,49 @@
+version: '3.8'
+
+services:
+  livekit:
+    image: livekit/livekit-server:latest
+    container_name: screen-share-livekit
+    restart: unless-stopped
+    ports:
+      - "7880:7880"   # HTTP/WebSocket signaling
+      - "7881:7881"   # WebRTC/ICE (UDP)
+      - "7882:7882"   # TURN (TCP)
+    environment:
+      - LIVEKIT_API_KEY=devkey
+      - LIVEKIT_API_SECRET=supersecretdevkey123
+      - LIVEKIT_WS_URL=ws://localhost:7880
+      - LIVEKIT_TURN_ENABLED=true
+      - LIVEKIT_TURN_EXTERNAL_IP=auto
+      - LIVEKIT_TURN_PORT=3478
+      - LIVEKIT_TURN_TLS_PORT=5349
+      - LIVEKIT_RTC_TCP_PORT=7882
+      - LIVEKIT_RTC_PORT=7881
+      - LIVEKIT_DEVELOPMENT=true
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml
+    networks:
+      - screen-share-net
+
+  coturn:
+    image: coturn/coturn:latest
+    container_name: screen-share-coturn
+    restart: unless-stopped
+    network_mode: host
+    command: >
+      -n
+      --lt-cred-mech
+      --realm=screen-share.local
+      --user=turnuser:turnpass
+      --external-ip=auto
+      --listening-port=3478
+      --tls-listening-port=5349
+      --min-port=49152
+      --max-port=65535
+      --verbose
+    networks:
+      - screen-share-net
+
+networks:
+  screen-share-net:
+    driver: bridge

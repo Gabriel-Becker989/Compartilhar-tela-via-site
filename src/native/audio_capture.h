@@ -20,6 +20,7 @@
 // Forward declarations
 struct AudioCaptureConfig;
 struct ProcessInfo;
+class ActivationHandler;
 
 // Configuration for audio capture
 struct AudioCaptureConfig {
@@ -74,24 +75,23 @@ private:
     // Initialize audio client for loopback
     HRESULT InitializeAudioClient();
     
-    // Find the audio session for our target process
-    HRESULT FindTargetAudioSession();
-    
-    // Enumerate audio sessions and find matching PID
-    HRESULT EnumerateSessionsForPID(DWORD targetPid, bool includeTree, IAudioSessionControl2** outSession);
+    // Initialize per-process loopback capture (Win11 24H2+ Process Loopback API)
+    HRESULT InitializeProcessLoopbackClient(DWORD processId, bool includeTree);
     
     // Convert audio format to float
     void ConvertToFloat(const BYTE* source, float* dest, UINT32 frames, WAVEFORMATEX* format);
-    
-    // Helper to check if PID is in process tree
-    bool IsPidInTree(DWORD pid, DWORD targetPid);
 
     // COM objects
     IMMDeviceEnumerator* deviceEnumerator_ = nullptr;
     IMMDevice* renderDevice_ = nullptr;
     IAudioClient* audioClient_ = nullptr;
     IAudioCaptureClient* captureClient_ = nullptr;
-    IAudioSessionControl2* targetSession_ = nullptr;
+    
+    // Capture data-ready event (event-driven WASAPI)
+    HANDLE sampleReadyEvent_ = nullptr;
+    
+    // Async activation handler for per-process loopback (owned by this instance)
+    ActivationHandler* activationHandler_ = nullptr;
     
     // Audio format
     WAVEFORMATEX* mixFormat_ = nullptr;

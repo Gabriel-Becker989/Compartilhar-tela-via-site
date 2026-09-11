@@ -3,10 +3,10 @@
   "variables": {
     "use_ccache_win": 0,
     "clang": 0,
-    "llvm_version": "0.0",
-    "gas_version": "2.38",
+    "llvm_version": "19.1.5",
+    "nasm_version": "3.01",
     "node_enable_experimentals": "false",
-    "node_prefix": "/",
+    "node_prefix": "\\usr\\local",
     "node_install_npm": "true",
     "node_install_corepack": "true",
     "control_flow_guard": "false",
@@ -22,14 +22,14 @@
     "want_separate_host_toolset": 0,
     "node_use_node_snapshot": "true",
     "node_use_node_code_cache": "true",
-    "node_write_snapshot_as_array_literals": "false",
+    "node_write_snapshot_as_array_literals": "true",
     "node_enable_v8_vtunejit": "false",
     "enable_pgo_generate": "false",
     "enable_pgo_use": "false",
     "enable_lto": "false",
     "enable_thin_lto": "false",
     "single_executable_application": "true",
-    "node_with_ltcg": "false",
+    "node_with_ltcg": "true",
     "node_tag": "",
     "node_release_urlbase": "https://nodejs.org/download/release/",
     "node_debug_lib": "false",
@@ -316,7 +316,6 @@
       "lib/internal/test_runner/reporter/v8-serializer.js",
       "lib/internal/test_runner/runner.js",
       "lib/internal/test_runner/snapshot.js",
-      "lib/internal/test_runner/tag_filter.js",
       "lib/internal/test_runner/test.js",
       "lib/internal/test_runner/tests_stream.js",
       "lib/internal/test_runner/utils.js",
@@ -401,6 +400,7 @@
       "lib/zlib.js"
     ],
     "node_cctest_sources": [
+      "src/node_snapshot_stub.cc",
       "test/cctest/inspector/test_network_requests_buffer.cc",
       "test/cctest/inspector/test_node_protocol.cc",
       "test/cctest/node_test_fixture.cc",
@@ -420,7 +420,6 @@
       "test/cctest/test_node_api.cc",
       "test/cctest/test_node_crypto.cc",
       "test/cctest/test_node_crypto_env.cc",
-      "test/cctest/test_node_ipc_serdes.cc",
       "test/cctest/test_node_postmortem_metadata.cc",
       "test/cctest/test_node_task_runner.cc",
       "test/cctest/test_path.cc",
@@ -461,7 +460,7 @@
     "v8_enable_webassembly": 1,
     "v8_enable_javascript_promise_hooks": 1,
     "v8_enable_lite_mode": 0,
-    "v8_enable_gdbjit": 1,
+    "v8_enable_gdbjit": 0,
     "v8_optimized_debug": 1,
     "dcheck_always_on": 0,
     "v8_enable_object_print": 1,
@@ -496,28 +495,17 @@
     "icu_path": "deps/icu-small",
     "icu_ver_major": "78",
     "icu_endianness": "l",
-    "icu_data_in": "../../deps/icu-tmp/icudt78l.dat",
+    "icu_data_in": "..\\..\\deps\\icu-tmp\\icudt78l.dat",
     "v8_enable_inspector": 1,
-    "node_section_ordering_info": "",
     "node_builtin_shareable_builtins": [
       "deps/undici/undici.js",
       "deps/amaro/dist/index.js"
     ],
     "ossfuzz": "false",
-    "nodedir": "/home/gabriel/.cache/node-gyp/24.19.0",
-    "python": "/usr/bin/python3",
+    "nodedir": "C:\\Users\\Gabriel\\AppData\\Local\\node-gyp\\Cache\\24.18.0",
+    "python": "C:\\Users\\Gabriel\\AppData\\Local\\Programs\\Python\\Python314\\python.exe",
     "standalone_static_library": 1,
-    "allow_scripts": "",
-    "global_prefix": "/home/gabriel/.nvm/versions/node/v24.19.0",
-    "init_module": "/home/gabriel/.npm-init.js",
-    "globalconfig": "/home/gabriel/.nvm/versions/node/v24.19.0/etc/npmrc",
-    "node_gyp": "/home/gabriel/.nvm/versions/node/v24.19.0/lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js",
-    "cache": "/home/gabriel/.npm",
-    "npm_version": "11.17.0",
-    "prefix": "/home/gabriel/.nvm/versions/node/v24.19.0",
-    "local_prefix": "/home/gabriel/Pessoal/Projetos/Compartilhar tela discord/Compartilhar-tela-via-site-main/Compartilhar tela discord",
-    "userconfig": "/home/gabriel/.npmrc",
-    "user_agent": "npm/11.17.0 node/v24.19.0 linux x64 workspaces/false"
+    "msbuild_path": "D:\\ProgramFiles\\Microsoft Visual Studio\\18\\Community\\MSBuild\\Current\\Bin\\MSBuild.exe"
   },
   "target_defaults": {
     "include_dirs": [],
@@ -534,6 +522,8 @@
         "variables": {},
         "v8_enable_v8_checks": 1
       }
-    }
+    },
+    "msbuild_toolset": "v145",
+    "msvs_windows_target_platform_version": "10.0.26100.0"
   }
 }

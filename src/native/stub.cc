@@ -83,7 +83,6 @@ public:
 
 // Global stub instance
 static WasapiLoopbackCapture* g_captureInstance = nullptr;
-static Napi::ThreadSafeFunction g_audioCallback;
 
 // N-API Stubs
 Napi::Value StartCapture(const Napi::CallbackInfo& info) {
@@ -172,7 +171,29 @@ Napi::Value GetProcessList(const Napi::CallbackInfo& info) {
     return result;
 }
 
-static Napi::ThreadSafeFunction g_audioCallback;
+static void CallJsAudioData(Napi::Env env,
+                            Napi::Function jsCallback,
+                            void* /*context*/,
+                            std::vector<float>* data) {
+    if (data == nullptr) return;
+    if (env == nullptr) {
+        delete data;
+        return;
+    }
+
+    Napi::ArrayBuffer buffer = Napi::ArrayBuffer::New(env, data->size() * sizeof(float));
+    if (data->size() > 0) {
+        float* dest = static_cast<float*>(buffer.Data());
+        memcpy(dest, data->data(), data->size() * sizeof(float));
+    }
+
+    Napi::TypedArray typedArray = Napi::Float32Array::New(env, data->size(), buffer, 0);
+    jsCallback.Call({typedArray});
+    delete data;
+}
+
+using AudioDataTSFN = Napi::TypedThreadSafeFunction<void, std::vector<float>, CallJsAudioData>;
+static AudioDataTSFN g_audioCallback;
 
 Napi::Value SetAudioCallback(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
@@ -184,27 +205,17 @@ Napi::Value SetAudioCallback(const Napi::CallbackInfo& info) {
     
     Napi::Function callback = info[0].As<Napi::Function>();
     
-    g_audioCallback = Napi::ThreadSafeFunction::New(
+    g_audioCallback = AudioDataTSFN::New(
         env,
         callback,
         "AudioDataCallback",
         0,
-        1,
-        [](Napi::Env) {},
-        [](Napi::Env env, Napi::Function jsCallback, const std::vector<float>& data) {
-            Napi::ArrayBuffer buffer = Napi::ArrayBuffer::New(env, data.size() * sizeof(float));
-            float* dest = static_cast<float*>(buffer.Data());
-            memcpy(dest, data.data(), data.size() * sizeof(float));
-            
-            Napi::TypedArray typedArray = Napi::Float32Array::New(env, data.size(), buffer, 0);
-            jsCallback.Call({typedArray});
-        }
+        1
     );
     
     if (g_captureInstance) {
         g_captureInstance->SetDataCallback([](const float* data, size_t frames, int channels, int sampleRate) {
-            std::vector<float> audioData(data, data + frames * channels);
-            g_audioCallback.NonBlockingCall(audioData);
+            g_audioCallback.NonBlockingCall(new std::vector<float>(data, data + frames * channels));
         });
     }
     

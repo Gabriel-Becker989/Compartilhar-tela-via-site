@@ -238,6 +238,8 @@ function createLinuxAudioModule() {
 app.disableHardwareAcceleration();
 
 // Allow screen capture and media permissions in renderer
+let mainWindow = null;
+
 app.whenReady().then(() => {
     session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
         const allowed = [
@@ -263,6 +265,8 @@ function createWindow() {
             nodeIntegration: false,
         },
     });
+
+    mainWindow = win;
 
     win.loadFile(path.join(__dirname, 'public/index.html'));
 
@@ -300,7 +304,25 @@ ipcMain.handle('audio:getProcessList', async () => {
 });
 
 ipcMain.handle('audio:startCapture', async (event, config) => {
-    if (audioModule) return await audioModule.startCapture(config);
+    if (audioModule) {
+        const result = await audioModule.startCapture(config);
+        // Wire the native data callback AFTER capture starts so it attaches to
+        // the live capture instance. Forward each PCM chunk to the renderer.
+        if (process.platform === 'win32' && wasiAudio) {
+            try {
+                wasiAudio.setAudioCallback((data) => {
+                    if (!data) return;
+                    const win = BrowserWindow.fromWebContents(event.sender) || mainWindow;
+                    if (win && !win.isDestroyed()) {
+                        win.webContents.send('audio:data', data.slice());
+                    }
+                });
+            } catch (err) {
+                console.warn('[Main] setAudioCallback failed:', err.message);
+            }
+        }
+        return result;
+    }
     throw new Error('Módulo de áudio não disponível nesta plataforma');
 });
 
