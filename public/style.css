@@ -173,6 +173,18 @@ transform: scale(0.98);
   min-height: 1.2em;
 }
 
+.room-error {
+  color: #ffd166;
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin: 10px 16px 0;
+  font-size: 0.9rem;
+  max-width: 700px;
+  align-self: center;
+}
+
 /* ===================== ROOM SCREEN ===================== */
 #room-screen { flex-direction: column; }
 
@@ -261,6 +273,19 @@ border-bottom: 1px solid var(--border);
   color: #fff;
   z-index: 10;
   pointer-events: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.stream-owner-avatar {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  background: #333;
 }
 
 .video-overlay {
@@ -487,6 +512,23 @@ justify-content: space-between;
 padding: 10px 0;
 border-bottom: 1px solid var(--border);
 font-size: 0.9rem;
+}
+
+.participant-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.participant-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+  border: 2px solid var(--accent);
+  background: var(--bg-primary);
 }
 
 .participant-name-text {
