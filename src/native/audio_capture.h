@@ -68,6 +68,10 @@ public:
     // Get last error message
     std::string GetLastError() const { return lastError_; }
 
+    // Format info actually in use (from the negotiated mix format)
+    int GetSampleRate() const;
+    int GetChannels() const;
+
 private:
     // Internal capture thread function
     void CaptureThread();
@@ -89,6 +93,7 @@ private:
     
     // Capture data-ready event (event-driven WASAPI)
     HANDLE sampleReadyEvent_ = nullptr;
+    bool eventDriven_ = false;
     
     // Async activation handler for per-process loopback (owned by this instance)
     ActivationHandler* activationHandler_ = nullptr;

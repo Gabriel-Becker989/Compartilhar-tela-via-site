@@ -234,8 +234,12 @@ function createLinuxAudioModule() {
     };
 }
 
-// Desativa aceleração de hardware para evitar travamentos
-app.disableHardwareAcceleration();
+// Aceleração de hardware: LIGADA por padrão (decode/render mais fluido).
+// Para voltar ao comportamento antigo (sem HW accel), inicie com:
+//   COLLAB_DISABLE_HW=1 compartilhar-tela-collab.exe
+if (process.env.COLLAB_DISABLE_HW === '1') {
+    app.disableHardwareAcceleration();
+}
 
 // Allow screen capture and media permissions in renderer
 let mainWindow = null;
@@ -314,7 +318,7 @@ ipcMain.handle('audio:startCapture', async (event, config) => {
                     if (!data) return;
                     const win = BrowserWindow.fromWebContents(event.sender) || mainWindow;
                     if (win && !win.isDestroyed()) {
-                        win.webContents.send('audio:data', data.slice());
+                        win.webContents.send('audio:data', data.slice(), Date.now());
                     }
                 });
             } catch (err) {

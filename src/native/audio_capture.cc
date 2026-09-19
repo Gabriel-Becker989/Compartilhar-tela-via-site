@@ -213,31 +213,14 @@ HRESULT WasapiLoopbackCapture::Initialize(const AudioCaptureConfig& config) {
         }
     }
     
-    // Override the mix format so the capture is 48000 Hz / stereo / float32 —
-    // the exact format the JS/WebAudio consumer expects. The previous renderer
-    // crash was caused by the TIME_CRITICAL capture thread, not this override.
-    // NOTE: the per-process virtual device can return a plain WAVEFORMATEX
-    // (not EXTENSIBLE); only write the EXTENSIBLE fields when the allocation
-    // actually is one, otherwise we overflow the CoTaskMem'd block.
-    if (config.processId == 0 && config.sampleRate > 0 && config.channels > 0) {
-        if (mixFormat_->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
-            WAVEFORMATEXTENSIBLE* extensible = reinterpret_cast<WAVEFORMATEXTENSIBLE*>(mixFormat_);
-            extensible->Format.nSamplesPerSec = config.sampleRate;
-            extensible->Format.nChannels = config.channels;
-            extensible->Format.nBlockAlign = (config.channels * config.bitDepth) / 8;
-            extensible->Format.nAvgBytesPerSec = extensible->Format.nSamplesPerSec * extensible->Format.nBlockAlign;
-            extensible->Format.wBitsPerSample = config.bitDepth;
-            extensible->Format.cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
-            extensible->SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
-            extensible->dwChannelMask = (config.channels == 2) ? (SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT) : SPEAKER_FRONT_CENTER;
-        } else {
-            mixFormat_->wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
-            mixFormat_->nSamplesPerSec = config.sampleRate;
-            mixFormat_->nChannels = config.channels;
-            mixFormat_->wBitsPerSample = config.bitDepth;
-            mixFormat_->nBlockAlign = (config.channels * config.bitDepth) / 8;
-            mixFormat_->nAvgBytesPerSec = mixFormat_->nSamplesPerSec * mixFormat_->nBlockAlign;
-        }
+    // The mix format stays as the device actually ships it (GetMixFormat):
+    // rate, bit depth and channel layout as negotiated by the engine. The
+    // renderer adopts the real rate (see GetCaptureStatus → sampleRate) so the
+    // AudioContext and the capture never disagree; ConvertToFloat() handles
+    // 16/32-bit and float, and CaptureThread normalizes any channel count to
+    // stereo. Forcing 48k here could mismatch 44.1k devices (crackle/popping).
+    if (config.processId == 0) {
+        // no-op: use the device's native mix format
     }
     
     // Initialize audio client for loopback capture
@@ -319,40 +302,78 @@ HRESULT WasapiLoopbackCapture::InitializeProcessLoopbackClient(DWORD processId, 
 }
 
 HRESULT WasapiLoopbackCapture::InitializeAudioClient() {
-    // Initialize for loopback capture
-    REFERENCE_TIME hnsRequestedDuration = 10000LL * config_.bufferDurationMs;
-    
+    // System loopback runs event-driven (SetEventHandle) so the capture thread
+    // wakes exactly when a buffer period finishes — no Sleep jitter, so the
+    // JS/WebWorklet consumer gets a steady ~10ms cadence (no underruns → no pops).
+    // Per-process loopback keeps the existing polling path (its async activation
+    // is hard to re-issue if the event setup fails).
+    const bool perProcess = config_.processId != 0;
+    const DWORD baseFlags = AUDCLNT_STREAMFLAGS_LOOPBACK |
+        (perProcess
+            ? (AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY)
+            : 0);
+    const REFERENCE_TIME hnsRequestedDuration = 10000LL * config_.bufferDurationMs;
+
     HRESULT hr = S_OK;
-    
-    if (config_.processId != 0) {
-        // Per-process loopback: the virtual device only accepts PCM16 with
-        // AUTOCONVERTPCM + the high-quality resampler, engine-default period.
+
+    // 1) Try with the event-callback flag (system path only).
+    DWORD flags = perProcess ? baseFlags : (baseFlags | AUDCLNT_STREAMFLAGS_EVENTCALLBACK);
+    hr = audioClient_->Initialize(
+        AUDCLNT_SHAREMODE_SHARED, flags,
+        perProcess ? 0 : hnsRequestedDuration,
+        0, mixFormat_, nullptr
+    );
+    bool wantsEvent = !perProcess;
+
+    // The device may reject a custom mix format; fall back to polling init
+    // (also used if an event can't be attached later).
+    auto reinitPolling = [&]() {
+        wantsEvent = false;
+        audioClient_->Release();
+        audioClient_ = nullptr;
+        hr = renderDevice_->Activate(
+            __uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void**)&audioClient_);
+        if (FAILED(hr)) {
+            lastError_ = "Failed to re-activate audio client";
+            return hr;
+        }
         hr = audioClient_->Initialize(
-            AUDCLNT_SHAREMODE_SHARED,
-            AUDCLNT_STREAMFLAGS_LOOPBACK |
-                AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
-                AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
-            0,
-            0,
-            mixFormat_,
-            nullptr
-        );
-    } else {
-        hr = audioClient_->Initialize(
-            AUDCLNT_SHAREMODE_SHARED,
-            AUDCLNT_STREAMFLAGS_LOOPBACK,
-            hnsRequestedDuration,
-            0,
-            mixFormat_,
-            nullptr
-        );
-    }
-    
+            AUDCLNT_SHAREMODE_SHARED, baseFlags, hnsRequestedDuration,
+            0, mixFormat_, nullptr);
+        return hr;
+    };
+
     if (FAILED(hr)) {
-        lastError_ = "Failed to initialize audio client " + FormatHr(hr);
+        hr = reinitPolling();
+    }
+
+    // Attach the data-ready event. If anything fails (including a device that
+    // accepted EVENTCALLBACK but rejects SetEventHandle), re-initialize WITHOUT
+    // the event flag — a client initialized with EVENTCALLBACK but no event
+    // attached will fail at Start().
+    bool eventOk = false;
+    if (SUCCEEDED(hr) && wantsEvent) {
+        sampleReadyEvent_ = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+        if (sampleReadyEvent_ &&
+            SUCCEEDED(audioClient_->SetEventHandle(sampleReadyEvent_))) {
+            eventOk = true;
+        }
+    }
+    if (SUCCEEDED(hr) && wantsEvent && !eventOk) {
+        if (sampleReadyEvent_) {
+            CloseHandle(sampleReadyEvent_);
+            sampleReadyEvent_ = nullptr;
+        }
+        wantsEvent = false;
+        hr = reinitPolling();
+    }
+    eventDriven_ = (SUCCEEDED(hr) && eventOk && wantsEvent);
+
+    if (FAILED(hr)) {
+        lastError_ = "Failed to initialize audio client for loopback: " + FormatHr(hr);
         return hr;
     }
-    
+
     // Get buffer size
     hr = audioClient_->GetBufferSize(&bufferFrameCount_);
     if (FAILED(hr)) {
@@ -432,14 +453,25 @@ void WasapiLoopbackCapture::CaptureThread() {
     // able to hold the worst case.
     std::vector<BYTE> buffer(bufferFrameCount_ * mixFormat_->nBlockAlign);
     
-    const DWORD pollInterval = 4; // ms — avoid busy-loop starving other audio clients
+    // 10 ms — polling only (fallback when event-driven WASAPI is unavailable).
+    const DWORD pollInterval = 10;
     while (!shouldStop_.load()) {
         UINT32 packetLength = 0;
         BYTE* data = nullptr;
         DWORD flags = 0;
         UINT64 devicePosition = 0, qpcPosition = 0;
-        
-        Sleep(pollInterval);
+
+        if (eventDriven_) {
+            // Wake exactly when a capture buffer period completes: steady
+            // cadence with no Sleep jitter (no underruns → no pops).
+            DWORD wait = WaitForSingleObject(sampleReadyEvent_, 40);
+            if (wait == WAIT_TIMEOUT || wait == WAIT_ABANDONED) {
+                if (shouldStop_.load()) break;
+                continue;
+            }
+        } else {
+            Sleep(pollInterval);
+        }
         if (shouldStop_.load()) break;
         
         UINT32 framesPerPacket = 0;
@@ -469,12 +501,33 @@ void WasapiLoopbackCapture::CaptureThread() {
         if (framesPerPacket > 0) {
             AudioPacket packet;
             packet.frames = framesPerPacket;
-            packet.channels = mixFormat_->nChannels;
             packet.sampleRate = mixFormat_->nSamplesPerSec;
-            packet.data.resize(framesPerPacket * packet.channels);
-            
-            ConvertToFloat(buffer.data(), packet.data.data(), framesPerPacket, mixFormat_);
-            
+            const int srcCh = mixFormat_->nChannels;
+
+            std::vector<float> floats(framesPerPacket * srcCh);
+            ConvertToFloat(buffer.data(), floats.data(), framesPerPacket, mixFormat_);
+
+            if (srcCh == 2) {
+                packet.channels = 2;
+                packet.data = std::move(floats);
+            } else {
+                // Normalize to stereo: the JS/WebAudio consumer always pairs
+                // samples as L/R. Mono → duplicate; >2 → keep first two channels.
+                packet.channels = 2;
+                packet.data.resize(framesPerPacket * 2);
+                if (srcCh == 1) {
+                    for (UINT32 i = 0; i < framesPerPacket; ++i) {
+                        packet.data[2 * i] = floats[i];
+                        packet.data[2 * i + 1] = floats[i];
+                    }
+                } else {
+                    for (UINT32 i = 0; i < framesPerPacket; ++i) {
+                        packet.data[2 * i] = floats[i * srcCh];
+                        packet.data[2 * i + 1] = floats[i * srcCh + 1];
+                    }
+                }
+            }
+
             {
                 std::lock_guard<std::mutex> lock(queueMutex_);
                 packetQueue_.push(std::move(packet));
@@ -484,29 +537,67 @@ void WasapiLoopbackCapture::CaptureThread() {
     }
 }
 
+int WasapiLoopbackCapture::GetSampleRate() const {
+    if (mixFormat_) return static_cast<int>(mixFormat_->nSamplesPerSec);
+    return config_.sampleRate;
+}
+
+int WasapiLoopbackCapture::GetChannels() const {
+    if (mixFormat_) return static_cast<int>(mixFormat_->nChannels);
+    return config_.channels;
+}
+
 void WasapiLoopbackCapture::ProcessingThread() {
+    // Coalesce packets: 1 TSFN/IPC call per buffer period caps throughput at
+    // ~10.5ms/packet → the renderer only receives ~45.7k samples/s and the
+    // worklet's jitter buffer bleeds (audio "cuts" while it refills). Batching
+    // ~2000 frames (~41ms) per callback cuts per-packet overhead ~4× and lets
+    // the full 48k/s through (probe with idle renderer proved 10ms cadence is
+    // possible; live renderers are busier and stretch it).
+    static constexpr size_t kBatchFrames = 2000;
+    static constexpr auto kBatchTimeout = std::chrono::milliseconds(40);
+    auto lastFlush = std::chrono::steady_clock::now();
+    std::vector<float> accumulator;
+    size_t batchFrames = 0;
+    int batchChannels = 2;
+    int batchRate = 48000;
+
     while (processingActive_.load()) {
         AudioPacket packet;
         bool hasPacket = false;
-        
+
         {
             std::unique_lock<std::mutex> lock(queueMutex_);
             queueCond_.wait_for(lock, std::chrono::milliseconds(10), [this] {
                 return !packetQueue_.empty() || !processingActive_.load();
             });
-            
             if (!packetQueue_.empty()) {
                 packet = std::move(packetQueue_.front());
                 packetQueue_.pop();
                 hasPacket = true;
             }
         }
-        
+
         if (hasPacket) {
+            if (batchFrames == 0) {
+                batchChannels = packet.channels;
+                batchRate = packet.sampleRate;
+            }
+            batchFrames += packet.frames;
+            accumulator.insert(accumulator.end(), packet.data.begin(), packet.data.end());
+        }
+
+        const auto elapsed = std::chrono::steady_clock::now() - lastFlush;
+        if (batchFrames >= kBatchFrames ||
+            (batchFrames > 0 && elapsed >= kBatchTimeout)) {
             std::lock_guard<std::mutex> lock(callbackMutex_);
             if (dataCallback_) {
-                dataCallback_(packet.data.data(), packet.frames, packet.channels, packet.sampleRate);
+                dataCallback_(accumulator.data(), static_cast<UINT32>(batchFrames),
+                              batchChannels, batchRate);
             }
+            accumulator.clear();
+            batchFrames = 0;
+            lastFlush = std::chrono::steady_clock::now();
         }
     }
 }
@@ -790,6 +881,12 @@ Napi::Value SetAudioCallback(const Napi::CallbackInfo& info) {
     }
     
     Napi::Function callback = info[0].As<Napi::Function>();
+    
+    // Libera a TSFN anterior antes de criar a nova para evitar memory leak.
+    // Release() sinaliza ao NAPI que este thread não vai mais usar a função antiga.
+    if (g_audioCallback) {
+        g_audioCallback.Release();
+    }
     
     // Create thread-safe function
     g_audioCallback = AudioDataTSFN::New(

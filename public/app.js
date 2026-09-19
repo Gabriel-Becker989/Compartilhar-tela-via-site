@@ -217,7 +217,7 @@ async function startAudioCapture() {
         sampleRate: 48000,
         channels: 2,
         bitDepth: 32, // IEEE_FLOAT
-        bufferDurationMs: 20
+        bufferDurationMs: 10 // menor latência (event-driven will deliver ~10ms cadence)
     };
     
     if (source === 'window') {
@@ -238,11 +238,21 @@ async function startAudioCapture() {
         } else {
             throw new Error('Módulo de áudio nativo não disponível');
         }
-        
+
+        // Ler a taxa real do mix format negociado (pode ser 44100 em vez de 48000)
+        try {
+            const caps = await window.audioCapture.getCaptureStatus();
+            audioCaptureState.mixRate = caps.sampleRate || 48000;
+            audioCaptureState.mixChannels = caps.channels || 2;
+        } catch (_) {
+            audioCaptureState.mixRate = 48000;
+            audioCaptureState.mixChannels = 2;
+        }
+
         audioCaptureState.isCapturing = true;
-        
+
         // Create audio track from native capture
-        audioTrack = await createAudioTrackFromNative();
+        audioTrack = await createAudioTrackFromNative(audioCaptureState.mixRate);
         
         // Set up audio callback to feed data
         setupAudioCallback();
@@ -294,9 +304,15 @@ async function stopAudioCapture() {
 }
 
 function setupAudioCallback() {
+    // Medição de latência do nosso pipeline (native → main → renderer → worklet).
+    // cadência = intervalo entre chunks (esperado ~10ms); trânsito = tempo main→renderer.
+    let lastArrival = null;
+    let cadenceSum = 0, transitSum = 0, maxTransit = 0, samples = 0;
+    const WINDOW = 200;
+
     // Register callback for native audio data
     if (window.audioCapture && window.audioCapture.onAudioData) {
-        window.audioCapture.onAudioData((audioData) => {
+        window.audioCapture.onAudioData((audioData, sentAtMs) => {
             // audioData is Float32Array (interleaved samples)
             if (audioWorkletNode && audioWorkletNode.port) {
                 audioWorkletNode.port.postMessage({
@@ -304,12 +320,29 @@ function setupAudioCallback() {
                     buffer: audioData
                 });
             }
+
+            const now = Date.now();
+            if (lastArrival !== null) cadenceSum += now - lastArrival;
+            lastArrival = now;
+            if (typeof sentAtMs === 'number') {
+                const lat = now - sentAtMs;
+                transitSum += lat;
+                if (lat > maxTransit) maxTransit = lat;
+            }
+            samples++;
+            if (samples >= WINDOW) {
+                console.log(`[Áudio] cadência méd=${(cadenceSum / samples).toFixed(1)}ms transit méd=${(transitSum / samples).toFixed(2)}ms máx=${maxTransit}ms (${samples} pacotes)`);
+                cadenceSum = 0; transitSum = 0; maxTransit = 0; samples = 0; lastArrival = null;
+            }
         });
     }
 }
 
-async function createAudioTrackFromNative() {
-    audioContextRef = new AudioContext({ sampleRate: 48000 });
+async function createAudioTrackFromNative(sampleRate) {
+    const rate = sampleRate || 48000;
+    // Usar a MESMA taxa do device que o nativo entrega — se o loopback for
+    // 44.1kHz e o context for 48kHz, o áudio sai esticado/crepitando.
+    audioContextRef = new AudioContext({ sampleRate: rate, latencyHint: 'interactive' });
     const destination = audioContextRef.createMediaStreamDestination();
 
     // Load the PCM worklet that consumes the native audio callback data
@@ -322,10 +355,17 @@ async function createAudioTrackFromNative() {
 
     try {
         audioWorkletNode = new AudioWorkletNode(audioContextRef, 'pcm-processor', {
-            processorOptions: { sampleRate: 48000 },
+            processorOptions: { sampleRate: rate },
             channelCount: 2,
             channelCountMode: 'explicit'
         });
+        audioWorkletNode.port.onmessage = (e) => {
+            if (e.data && e.data.type === 'stats') {
+                const s = e.data;
+                const ringMs = s.ringAvailable != null ? (s.ringAvailable / 2 / s.sampleRate * 1000).toFixed(0) : '?';
+                console.log(`[Worklet] rate=${s.sampleRate} recv=${s.receivedSamples} cons=${s.consumedSamples} drift=${s.drift} buf=${ringMs}ms underruns=${s.underrunCount} maxGap=${(s.maxGapSamples / 2 / s.sampleRate * 1000).toFixed(0)}ms refills=${s.refills}(${(s.refillSamples / s.sampleRate * 1000).toFixed(0)}ms) drops=${s.dropCount}`);
+            }
+        };
         audioWorkletNode.connect(destination);
     } catch (err) {
         console.warn('Falha ao criar AudioWorkletNode:', err);
@@ -348,54 +388,30 @@ const VIDEO_QUALITY_PRESETS = {
     '1080p60': {
         width: 1920, height: 1080, frameRate: 60,
         encoding: {
-            maxBitrate: 8000,      // kbps
+            maxBitrate: 6000,      // kbps
             maxFramerate: 60,
-            scalabilityMode: 'L3T3', // 3 spatial x 3 temporal layers
-            // Simulcast layers: 1080p, 720p, 480p
-            simulcast: [
-                { scaleResolutionDownBy: 1, maxBitrate: 8000, maxFramerate: 60 },  // 1080p60
-                { scaleResolutionDownBy: 2, maxBitrate: 3500, maxFramerate: 30 },  // 720p30
-                { scaleResolutionDownBy: 4, maxBitrate: 1500, maxFramerate: 30 }   // 480p30
-            ]
+            // scalabilityMode omitido: H.264 não suporta SVC no Chromium WebRTC
         }
     },
     '1080p30': {
         width: 1920, height: 1080, frameRate: 30,
         encoding: {
-            maxBitrate: 5000,
+            maxBitrate: 4000,
             maxFramerate: 30,
-            scalabilityMode: 'L3T2',
-            simulcast: [
-                { scaleResolutionDownBy: 1, maxBitrate: 5000, maxFramerate: 30 },
-                { scaleResolutionDownBy: 2, maxBitrate: 2500, maxFramerate: 30 },
-                { scaleResolutionDownBy: 4, maxBitrate: 1000, maxFramerate: 15 }
-            ]
         }
     },
     '720p60': {
         width: 1280, height: 720, frameRate: 60,
         encoding: {
-            maxBitrate: 4500,
+            maxBitrate: 3500,
             maxFramerate: 60,
-            scalabilityMode: 'L3T3',
-            simulcast: [
-                { scaleResolutionDownBy: 1, maxBitrate: 4500, maxFramerate: 60 },
-                { scaleResolutionDownBy: 1.5, maxBitrate: 2500, maxFramerate: 30 },
-                { scaleResolutionDownBy: 2, maxBitrate: 1200, maxFramerate: 30 }
-            ]
         }
     },
     '720p30': {
         width: 1280, height: 720, frameRate: 30,
         encoding: {
-            maxBitrate: 3000,
+            maxBitrate: 2500,
             maxFramerate: 30,
-            scalabilityMode: 'L3T2',
-            simulcast: [
-                { scaleResolutionDownBy: 1, maxBitrate: 3000, maxFramerate: 30 },
-                { scaleResolutionDownBy: 1.5, maxBitrate: 1800, maxFramerate: 30 },
-                { scaleResolutionDownBy: 2, maxBitrate: 900, maxFramerate: 15 }
-            ]
         }
     },
     '480p30': {
@@ -403,11 +419,6 @@ const VIDEO_QUALITY_PRESETS = {
         encoding: {
             maxBitrate: 1500,
             maxFramerate: 30,
-            scalabilityMode: 'L2T2',
-            simulcast: [
-                { scaleResolutionDownBy: 1, maxBitrate: 1500, maxFramerate: 30 },
-                { scaleResolutionDownBy: 2, maxBitrate: 600, maxFramerate: 15 }
-            ]
         }
     }
 };
@@ -596,6 +607,16 @@ async function shareScreenWithFallback(qualityKey, audioTrack) {
             const stream = await captureScreenStream(sourceId, preset);
             screenShareStream = stream;
 
+            // Sem isso o Chromium trata o capture como conteúdo "motion" e
+            // derruba a RESOLUÇÃO de captura (ex.: um preset 1080p vira 480p)
+            // para segurar fps. contentHint='detail' + maintain-resolution
+            // garantem que a qualidade escolhida chega de verdade.
+            const vTrack = stream.getVideoTracks()[0];
+            if (vTrack) {
+                try { vTrack.contentHint = 'detail'; } catch (_) {}
+                try { await vTrack.applyConstraints({ degradationPreference: 'maintain-resolution' }); } catch (_) {}
+            }
+
             // 2. Add audio track if available
             if (audioTrack && !stream.getAudioTracks().length) {
                 stream.addTrack(audioTrack);
@@ -611,6 +632,11 @@ async function shareScreenWithFallback(qualityKey, audioTrack) {
                 source: LivekitClient.Track.Source.ScreenShare,
                 name: `screen-${attemptQuality}`,
                 videoEncoding: preset.encoding,
+                // simulcast: false — H.264 não suporta SVC real no WebRTC Chromium.
+                // Simulcast com H.264 codificaria 3 streams separados (1x/0.5x/0.25x)
+                // triplicando o uso de CPU de encoding sem ganho de qualidade adaptativa.
+                simulcast: false,
+                videoCodec: 'h264',     // prefere encode/decode com aceleração de hardware
                 dtx: true,
             });
 
@@ -620,6 +646,12 @@ async function shareScreenWithFallback(qualityKey, audioTrack) {
                 screenShareAudioPublication = await myRoom.localParticipant.publishTrack(audio, {
                     source: LivekitClient.Track.Source.Microphone,
                     name: 'screen-audio',
+                    // dtx: false — DTX (Discontinuous Transmission) pode silenciar o Opus
+                    // durante períodos de áudio baixo (ex.: música suave, efeitos sutis de
+                    // jogo), causando cortes. Para áudio de screen share, continuidade é
+                    // mais importante do que economia de banda.
+                    dtx: false,
+                    red: true, // Opus: redundância contra perda de pacote
                 });
             }
 
@@ -703,60 +735,74 @@ function updateAudioStatusBadge(isActive) {
     }
 }
 
-// Override existing share/stop handlers
-if (btnShare) {
-    btnShare.addEventListener('click', async () => {
-        if (!myRoom) return;
-        
+async function startShareFlow(qualityKey) {
+    if (!myRoom) return;
+
+    try {
+        // Best-effort audio capture: audio failures must NOT block video sharing
+        let audioResult = { success: false, track: null };
+        let audioError = null;
         try {
-            const qualityKey = qualitySelect ? qualitySelect.value : '720p30';
-            
-            // Best-effort audio capture: audio failures must NOT block video sharing
-            let audioResult = { success: false, track: null };
-            let audioError = null;
-            try {
-                audioResult = await startAudioCapture();
-            } catch (err) {
-                audioError = err;
-                console.warn('[Share] Áudio indisponível, continuando sem áudio:', err);
+            audioResult = await startAudioCapture();
+        } catch (err) {
+            audioError = err;
+            console.warn('[Share] Áudio indisponível, continuando sem áudio:', err);
+        }
+
+        // Use fallback mechanism
+        const result = await shareScreenWithFallback(qualityKey, audioResult.track || null);
+
+        if (result.success) {
+            btnShare.classList.add('hidden');
+            if (btnStop) btnStop.classList.remove('hidden');
+            updateAudioStatusBadge(true);
+
+            // Update effective quality badge
+            if (effectiveQualityBadge) {
+                effectiveQualityBadge.textContent = `📹 ${result.qualityUsed}`;
+                effectiveQualityBadge.classList.remove('hidden');
+                effectiveQualityBadge.className = 'effective-quality-badge';
             }
 
-            // Use fallback mechanism
-            const result = await shareScreenWithFallback(qualityKey, audioResult.track || null);
-            
-            if (result.success) {
-                btnShare.classList.add('hidden');
-                if (btnStop) btnStop.classList.remove('hidden');
-                updateAudioStatusBadge(true);
-                
-                // Update effective quality badge
-                if (effectiveQualityBadge) {
-                    effectiveQualityBadge.textContent = `📹 ${result.qualityUsed}`;
-                    effectiveQualityBadge.classList.remove('hidden');
-                    effectiveQualityBadge.className = 'effective-quality-badge';
-                }
-                
-                // Show notification if fallback was used
-                if (result.qualityUsed !== qualityKey) {
-                    showRoomError(`Qualidade ajustada automaticamente para ${result.qualityUsed}`);
-                }
-                if (audioError) {
-                    showRoomError('⚠️ Áudio indisponível (' + (audioError.message || 'erro').split('\n')[0] + '). A transmissão segue sem som.');
-                }
-            } else {
-                throw result.error || new Error('Falha ao iniciar compartilhamento');
+            // Show notification if fallback was used
+            if (result.qualityUsed !== qualityKey) {
+                showRoomError(`Qualidade ajustada automaticamente para ${result.qualityUsed}`);
             }
-            
-        } catch (err) {
-            console.error('Erro ao compartilhar tela com áudio:', err);
-            showRoomError('Erro ao iniciar compartilhamento: ' + err.message.split('\n')[0]);
-            // Clean up: release any capture that may have started, and force the
-            // source picker to re-open on the next attempt.
-            try { await stopAudioCapture(); } catch (e) {}
-            selectedScreenSourceId = null;
-            btnStop.classList.add('hidden');
-            if (btnShare) btnShare.classList.remove('hidden');
+            if (audioError) {
+                showRoomError('⚠️ Áudio indisponível (' + (audioError.message || 'erro').split('\n')[0] + '). A transmissão segue sem som.');
+            }
+        } else {
+            throw result.error || new Error('Falha ao iniciar compartilhamento');
         }
+    } catch (err) {
+        console.error('Erro ao compartilhar tela com áudio:', err);
+        showRoomError('Erro ao iniciar compartilhamento: ' + err.message.split('\n')[0]);
+        // Clean up: release any capture that may have started, and force the
+        // source picker to re-open on the next attempt.
+        try { await stopAudioCapture(); } catch (e) {}
+        selectedScreenSourceId = null;
+        btnStop.classList.add('hidden');
+        if (btnShare) btnShare.classList.remove('hidden');
+    }
+}
+
+// Override existing share/stop handlers
+if (btnShare) {
+    btnShare.addEventListener('click', () => {
+        if (!myRoom) return;
+        startShareFlow(qualitySelect ? qualitySelect.value : '720p30');
+    });
+}
+
+if (qualitySelect) {
+    // Re-shares at the new quality when the dropdown changes DURING a live share
+    qualitySelect.addEventListener('change', async () => {
+        const wasSharing = btnShare && btnShare.classList.contains('hidden');
+        if (!wasSharing || !myRoom) return;
+        const newQuality = qualitySelect.value;
+        console.log(`[Share] Qualidade alterada para: ${newQuality}`);
+        await stopScreenShare();
+        await startShareFlow(newQuality);
     });
 }
 
@@ -803,8 +849,21 @@ async function iniciarLogin(roomName, participantName, password, avatarDataUrl) 
     const res = await fetch(`${VERCEL_API_URL}/api/get-token?roomName=${encodeURIComponent(roomName)}&participantName=${encodeURIComponent(participantName)}&password=${encodeURIComponent(password)}&avatar=${encodeURIComponent(avatarDataUrl)}`);
     const { token, url } = await res.json();
 
+    try {
+      if (LivekitClient.setLogLevel) {
+        // O modo debug imprime objetos gigantes ("webrtc stats {…}") no console
+        // a cada poucos segundos, o que CONGELA o main-thread e esvazia o
+        // jitter buffer do áudio (causa os "pipocos"). Nível alto silencia isso.
+        LivekitClient.setLogLevel('warn');
+      }
+    } catch (_) {}
+
     const room = new LivekitClient.Room({
       autoSubscribe: false,
+      // adaptiveStream desligado de propósito: em cena de compartilhamento de
+      // tela o espectador quer a MELHOR camada que o link aguenta (a grade
+      // pequena faria o adaptive pedir sempre 480p, ignorando o preset do emissor).
+      videoCodec: 'h264',   // codec padrão para os tracks publicados nesta sala
     });
     myRoom = room;
 

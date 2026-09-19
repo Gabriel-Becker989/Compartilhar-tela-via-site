@@ -35,9 +35,9 @@ contextBridge.exposeInMainWorld('audioCapture', {
 });
 
 // Forward native PCM chunks (main -> renderer) to the registered callback
-ipcRenderer.on('audio:data', (_event, buffer) => {
+ipcRenderer.on('audio:data', (_event, buffer, sentAtMs) => {
     const cb = window._audioDataCallback;
-    if (cb) cb(buffer);
+    if (cb) cb(buffer, sentAtMs);
 });
 
 // Expose Electron API for screen capture
