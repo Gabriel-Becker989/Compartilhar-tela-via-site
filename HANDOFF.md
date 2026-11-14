@@ -97,6 +97,18 @@ O refill de arranque visto na parte 1 não se repetiu, o que reforça a leitura 
 
 **Reversão (se necessário):** fechar o Electron; copiar `original\wasi_audio.node` e `original\wasi_audio.pdb` do backup para `build/Release/*.promote-tmp`, tirar o atributo somente leitura, conferir `5DF88514…C727` / `3253EBB8…457C`, renomear por cima, conferir o hash e repetir o smoke isolado. O backup completo de `build/Release` está em `original\`.
 
-**Ainda pendente:** `npm start` e transmissão real com o addon promovido (pelo proprietário ou com autorização própria); sessão longa; corrigir `rebuild`/`build:win`, que **continuam podendo sobrescrever** o addon promovido (para refazer, use o backup `incoming\`); validar o instalador. Nada foi commitado; `build/` é ignorado pelo git.
+## Atualização 14/11/2026 — commits e instalador 3C (Claude Code)
+
+**Commits (aprovados pelo proprietário, sem push), sobre `ff2a980`:** `e4d0c86` native (PID Drain + diagnóstico), `b52e098` modo isolado (`main.js` parcial), `9f70765` Linux (`main.js` restante + `stub.cc`), `9237feb` `screenShareEncoding`, `d035ca9` script de build isolado, `b8a692b` `test-presets.js`, `24636e9` docs. `ARQUITETURA.md` ficou fora de propósito (histórico). O arquivo `-` da raiz já era rastreado e não tem alteração; `.env`, `build/` e `dist*/` são ignorados. O working tree batia com o HEAD após os commits.
+
+**Instalador:** gerado sem `build:win` e sem `node-gyp`, com `node node_modules/electron-builder/cli.js --win -c.npmRebuild=false -c.directories.output=dist-3c` (pelo Bash: no PowerShell o argumento `-c.directories.output=…` é quebrado e lido como arquivo de configuração). Saída 0, `package.json` inalterado.
+- Instalador: `dist-3c\compartilhar-tela-collab Setup 1.0.0.exe` (NSIS one-click, por usuário), SHA-256 `DD5776F60B9410BE63EDB2CFCFDB9D658EC0C29B8D95B488DF4A3FB91C43BDEC`, 76,7 MB. **Não instalado.**
+- `build/Release/wasi_audio.node` antes e depois: `2FDF4E35…98C0`.
+- `win-unpacked\resources\app.asar.unpacked\build\Release\wasi_audio.node`: `2FDF4E35…98C0` (igual ao 3B).
+- `app.asar` (635 entradas): fora de `node_modules`, só `main.js`, `preload.js`, `package.json`, `public/*` e o stub do `.node`. Nenhum `.env` no asar nem em `dist-3c`; `server.log` e `-` também não entram.
+- Smoke test de `win-unpacked\compartilhar-tela-collab.exe` em modo isolado: o addon carregado (lista de módulos) é o de `app.asar.unpacked`, `isCapturing=false`, sem sala, **código de saída 0**.
+- Avisos do builder: sem `author` no `package.json` e ícone padrão do Electron. `livekit-server-sdk` (dependência da função Vercel) vai junto no asar em `node_modules`, sem uso no app; avaliar depois.
+
+**Ainda pendente:** instalar e testar o instalador (proprietário); corrigir `build:win`/`rebuild` no `package.json` (com aprovação) para usar o fluxo validado acima; `npm start` e transmissão real com o addon promovido (pelo proprietário ou com autorização própria); sessão longa; corrigir `rebuild`/`build:win`, que **continuam podendo sobrescrever** o addon promovido (para refazer, use o backup `incoming\`); validar o instalador. Nada foi commitado; `build/` é ignorado pelo git.
 
 Para arquitetura, histórico, limites das evidências, logs e detalhes das fases, consulte `RELATORIO_CONTINUIDADE_PROJETO.md`.
