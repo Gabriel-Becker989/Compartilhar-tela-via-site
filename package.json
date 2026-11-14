@@ -7,6 +7,7 @@
     "start": "electron . --disable-gpu --disable-gpu-compositing --no-sandbox",
     "dev": "electron . --dev",
     "rebuild": "node-gyp rebuild",
+    "build:native:electron:isolated": "node scripts/build-native-electron-isolated.js",
     "build:win": "node-gyp rebuild && electron-builder --win",
     "build:linux": "electron-builder --linux AppImage"
   },
