@@ -631,7 +631,10 @@ async function shareScreenWithFallback(qualityKey, audioTrack) {
             screenSharePublication = await myRoom.localParticipant.publishTrack(videoTrack, {
                 source: LivekitClient.Track.Source.ScreenShare,
                 name: `screen-${attemptQuality}`,
-                videoEncoding: preset.encoding,
+                screenShareEncoding: {
+                    maxBitrate: preset.encoding.maxBitrate * 1000, // preset em kbps; WebRTC em bps
+                    maxFramerate: preset.encoding.maxFramerate,
+                },
                 // simulcast: false — H.264 não suporta SVC real no WebRTC Chromium.
                 // Simulcast com H.264 codificaria 3 streams separados (1x/0.5x/0.25x)
                 // triplicando o uso de CPU de encoding sem ganho de qualidade adaptativa.
