@@ -1,6 +1,77 @@
 const { app, BrowserWindow, ipcMain, desktopCapturer, session } = require('electron');
 const path = require('path');
+const fs = require('fs');
+const os = require('os');
 const { execSync, spawn } = require('child_process');
+
+// Opt-in diagnostic run. Configure paths synchronously, before Electron creates
+// its default session or loads the native addon.
+const isolatedRunValue = process.env.COLLAB_ISOLATED_RUN;
+if (isolatedRunValue !== undefined && isolatedRunValue !== '1') {
+    throw new Error('COLLAB_ISOLATED_RUN must be 1 when set');
+}
+const isolatedRun = isolatedRunValue === '1';
+let isolatedAddonPath = null;
+
+if (isolatedRun) {
+    const canonical = (input) => {
+        let ancestor = path.resolve(input);
+        const suffix = [];
+        while (true) {
+            try {
+                fs.lstatSync(ancestor);
+                break;
+            } catch (err) {
+                if (err.code !== 'ENOENT') throw err;
+                const parent = path.dirname(ancestor);
+                if (parent === ancestor) throw new Error(`Cannot resolve path: ${input}`);
+                suffix.unshift(path.basename(ancestor));
+                ancestor = parent;
+            }
+        }
+        return path.join(fs.realpathSync.native(ancestor), ...suffix);
+    };
+    const overlaps = (a, b) => {
+        const contains = (parent, child) => {
+            const relative = path.relative(parent.toLowerCase(), child.toLowerCase());
+            return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+        };
+        return contains(a, b) || contains(b, a);
+    };
+
+    const workspace = canonical(__dirname);
+    const normalUserData = canonical(app.getPath('userData'));
+    const normalSessionData = canonical(app.getPath('sessionData'));
+    const tempBase = canonical(os.tmpdir());
+    if (overlaps(tempBase, workspace) || overlaps(tempBase, normalUserData) || overlaps(tempBase, normalSessionData)) {
+        throw new Error('Temporary base overlaps the workspace or normal Electron profile');
+    }
+
+    const addonOverride = process.env.COLLAB_ISOLATED_ADDON;
+    if (addonOverride !== undefined) {
+        if (!path.isAbsolute(addonOverride) || path.extname(addonOverride).toLowerCase() !== '.node') {
+            throw new Error('COLLAB_ISOLATED_ADDON must be an absolute .node path');
+        }
+        const addon = fs.realpathSync.native(addonOverride);
+        if (!fs.statSync(addon).isFile() || overlaps(addon, workspace) || overlaps(addon, normalUserData) || overlaps(addon, normalSessionData)) {
+            throw new Error('Isolated addon must be a file outside the workspace and normal Electron profile');
+        }
+        fs.accessSync(addon, fs.constants.R_OK);
+        isolatedAddonPath = addon;
+    }
+
+    const runRoot = fs.mkdtempSync(path.join(tempBase, 'screen-share-collab-'));
+    const userData = path.join(runRoot, 'userData');
+    const sessionData = path.join(runRoot, 'sessionData');
+    fs.mkdirSync(userData);
+    fs.mkdirSync(sessionData);
+    if (overlaps(canonical(runRoot), workspace) || overlaps(canonical(runRoot), normalUserData) || overlaps(canonical(runRoot), normalSessionData)) {
+        throw new Error('Isolated run directory overlaps the workspace or normal Electron profile');
+    }
+    app.setPath('userData', userData);
+    app.setPath('sessionData', sessionData);
+    console.log('[Main] Isolated run data:', runRoot);
+}
 
 // ============================================================================
 // Native Audio Module (Windows WASAPI) or Linux (PulseAudio/PipeWire)
@@ -11,9 +82,10 @@ let linuxAudio = null;
 
 if (process.platform === 'win32') {
     try {
-        wasiAudio = require('./build/Release/wasi_audio.node');
+        wasiAudio = require(isolatedAddonPath || './build/Release/wasi_audio.node');
         console.log('[Main] Windows WASAPI module loaded');
     } catch (err) {
+        if (isolatedAddonPath) throw err;
         console.warn('[Main] WASAPI module not available:', err.message);
     }
 }
