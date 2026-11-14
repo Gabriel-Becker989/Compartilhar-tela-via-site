@@ -4,6 +4,8 @@
 #include <napi.h>
 #include <vector>
 #include <string>
+#include <functional>
+#include <cstring>
 
 // Stub types matching the Windows implementation
 struct AudioCaptureConfig {

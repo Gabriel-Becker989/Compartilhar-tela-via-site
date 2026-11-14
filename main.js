@@ -100,7 +100,15 @@ function createLinuxAudioModule() {
     let captureProcess = null;
     let isCapturing = false;
 
+    let audioCallback = null;
+
     return {
+        // Espelha a API do módulo Windows: o IPC handler do main registra aqui
+        // um callback que faz webContents.send('audio:data', ...).
+        setAudioCallback: (cb) => {
+            audioCallback = cb;
+        },
+
         getProcessList: async () => {
             const processes = [];
 
@@ -224,48 +232,60 @@ function createLinuxAudioModule() {
                     captureProcess = null;
                 }
 
-                // Use parecord to capture audio and output to a pipe
-                // For system audio (processId=0): capture from default monitor source
-                // For specific app: capture from matching sink-input
-
+                // parecord RAW s16le @48k estéreo (sem header WAV — o renderer
+                // espera PCM puro Float32 interleaved, convertido abaixo).
                 const args = [
                     '--format=s16le',
                     '--rate=48000',
-                    '--channels=2',
-                    '--file-format=wav',
-                    '-' // output to stdout
+                    '--channels=2'
                 ];
 
-                // If specific process, try to find its sink-input
+                // Áudio do sistema = monitor do sink padrão (PulseAudio/PipeWire).
+                // NOTA: captura por-aplicativo exigiria um null-sink dedicado;
+                // por ora qualquer processId usa o monitor do sistema.
                 if (processId > 0) {
-                    try {
-                        const sinkInputs = execSync('pactl list short sink-inputs 2>/dev/null', {
-                            encoding: 'utf-8',
-                            timeout: 2000
-                        });
-
-                        for (const line of sinkInputs.split('\n').filter(Boolean)) {
-                            const parts = line.split('\t');
-                            if (parts.length >= 2) {
-                                const detail = execSync(`pactl list sink-inputs 2>/dev/null | sed -n '/Sink Input #${parts[0]}:/,/^[^ ]/p'`, {
-                                    encoding: 'utf-8',
-                                    timeout: 2000
-                                });
-
-                                const pidMatch = detail.match(/application\.process\.id\s*=\s*"${processId}"/);
-                                if (pidMatch) {
-                                    args.unshift('--device=' + parts[1]);
-                                    break;
-                                }
-                            }
-                        }
-                    } catch (e) {
-                        console.warn('[Linux] Could not find sink-input for PID', processId);
-                    }
+                    console.warn('[Linux] Captura por aplicativo ainda não suportada; usando áudio do sistema');
                 }
+                try {
+                    const defaultSink = execSync('pactl get-default-sink 2>/dev/null', {
+                        encoding: 'utf-8',
+                        timeout: 2000
+                    }).trim();
+                    if (defaultSink) args.push('--device=' + defaultSink + '.monitor');
+                } catch (e) {
+                    console.warn('[Linux] pactl get-default-sink failed, usando fonte padrão');
+                }
+
+                args.push('-'); // stdout
 
                 captureProcess = spawn('parecord', args, {
                     stdio: ['ignore', 'pipe', 'pipe']
+                });
+
+                // Lê o PCM s16le e repassa ao renderer em lotes de 2000 frames
+                // (~41ms), espelhando o batching do caminho Windows (evita
+                // engarrafamento de IPC por mensagem).
+                const FRAMES_PER_CHUNK = 2000;
+                const BYTES_PER_FRAME = 4; // 2ch * 16bit
+                const NEED = FRAMES_PER_CHUNK * BYTES_PER_FRAME;
+                let pending = Buffer.alloc(0);
+
+                captureProcess.stdout.on('data', (chunk) => {
+                    pending = Buffer.concat([pending, chunk]);
+                    while (pending.length >= NEED) {
+                        const slice = pending.subarray(0, NEED);
+                        pending = pending.subarray(NEED);
+                        const floats = new Float32Array(FRAMES_PER_CHUNK * 2);
+                        for (let i = 0; i < floats.length; i++) {
+                            floats[i] = slice.readInt16LE(i * 2) / 32768;
+                        }
+                        if (audioCallback) audioCallback(floats);
+                    }
+                });
+
+                captureProcess.stderr.on('data', (data) => {
+                    const msg = data.toString().trim();
+                    if (msg) console.warn('[Linux] parecord:', msg);
                 });
 
                 captureProcess.on('error', (err) => {
@@ -301,7 +321,11 @@ function createLinuxAudioModule() {
 
         getCaptureStatus: async () => ({
             isCapturing,
-            lastError: null
+            lastError: null,
+            // O renderer cria o AudioContext na taxa REAL do device — aqui o
+            // parecord fixa 48000/2ch, então reportamos o mesmo.
+            sampleRate: 48000,
+            channels: 2
         })
     };
 }
@@ -311,6 +335,12 @@ function createLinuxAudioModule() {
 //   COLLAB_DISABLE_HW=1 compartilhar-tela-collab.exe
 if (process.env.COLLAB_DISABLE_HW === '1') {
     app.disableHardwareAcceleration();
+}
+
+// AppImage Linux não instala o chrome-sandbox com SUID; sem este switch o
+// Chromium aborta com "SUID sandbox helper not found" na maioria das distros.
+if (process.platform === 'linux') {
+    app.commandLine.appendSwitch('no-sandbox');
 }
 
 // Allow screen capture and media permissions in renderer
@@ -395,6 +425,18 @@ ipcMain.handle('audio:startCapture', async (event, config) => {
                 });
             } catch (err) {
                 console.warn('[Main] setAudioCallback failed:', err.message);
+            }
+        } else if (process.platform === 'linux' && linuxAudio) {
+            try {
+                linuxAudio.setAudioCallback((data) => {
+                    if (!data) return;
+                    const win = BrowserWindow.fromWebContents(event.sender) || mainWindow;
+                    if (win && !win.isDestroyed()) {
+                        win.webContents.send('audio:data', data, Date.now());
+                    }
+                });
+            } catch (err) {
+                console.warn('[Main] linuxAudio.setAudioCallback failed:', err.message);
             }
         }
         return result;
