@@ -13,6 +13,17 @@
 #include <string>
 #include <algorithm>
 #include <cmath>
+#include <iostream>
+
+// Each extrema counter has a single writer (capture or processing thread).
+static void RecordMin(std::atomic<uint64_t>& counter, uint64_t value) {
+    const auto old = counter.load(std::memory_order_relaxed);
+    if (old == 0 || value < old) counter.store(value, std::memory_order_relaxed);
+}
+static void RecordMax(std::atomic<uint64_t>& counter, uint64_t value) {
+    if (value > counter.load(std::memory_order_relaxed))
+        counter.store(value, std::memory_order_relaxed);
+}
 
 // Windows 11 24H2+ process-loopback activation API (audioclientactivationparams.h).
 #if defined(__has_include) && __has_include(<audioclientactivationparams.h>)
@@ -417,6 +428,9 @@ HRESULT WasapiLoopbackCapture::Start() {
     // WASAPI loopback can starve the audio engine and crash other clients,
     // e.g. Chromium's WebAudio renderer).
     captureThread_ = std::thread(&WasapiLoopbackCapture::CaptureThread, this);
+
+    diagnosticsActive_.store(true);
+    diagnosticsThread_ = std::thread(&WasapiLoopbackCapture::DiagnosticsThread, this);
     
     return S_OK;
 }
@@ -443,6 +457,10 @@ HRESULT WasapiLoopbackCapture::Stop() {
     if (processingThread_.joinable()) {
         processingThread_.join();
     }
+
+    diagnosticsActive_.store(false);
+    diagnosticsCond_.notify_one();
+    if (diagnosticsThread_.joinable()) diagnosticsThread_.join();
     
     return S_OK;
 }
@@ -455,6 +473,12 @@ void WasapiLoopbackCapture::CaptureThread() {
     
     // 10 ms — polling only (fallback when event-driven WASAPI is unavailable).
     const DWORD pollInterval = 10;
+    std::chrono::steady_clock::time_point lastPacketTime{};
+    UINT64 expectedPosition = 0;
+    bool hasExpectedPosition = false;
+    const bool drainPid = config_.processId != 0 && !eventDriven_;
+    // Bound one wake so a continuously replenished buffer cannot delay Stop().
+    static constexpr UINT32 kMaxPidPacketsPerWake = 64;
     while (!shouldStop_.load()) {
         UINT32 packetLength = 0;
         BYTE* data = nullptr;
@@ -473,66 +497,134 @@ void WasapiLoopbackCapture::CaptureThread() {
             Sleep(pollInterval);
         }
         if (shouldStop_.load()) break;
-        
-        UINT32 framesPerPacket = 0;
-        HRESULT hr = captureClient_->GetBuffer(&data, &framesPerPacket, &flags, &devicePosition, &qpcPosition);
-        
-        if (hr == AUDCLNT_S_BUFFER_EMPTY) {
-            continue;
-        }
-        
-        if (FAILED(hr) || data == nullptr) {
-            continue;
-        }
-        
-        if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
-            // Silence - fill with zeros
-            std::fill(buffer.begin(), buffer.end(), 0);
-        } else {
-            // Copy data (buffer is sized for the worst case, so it always fits)
-            size_t bytesToCopy = framesPerPacket * mixFormat_->nBlockAlign;
-            memcpy(buffer.data(), data, bytesToCopy);
-        }
-        
-        hr = captureClient_->ReleaseBuffer(framesPerPacket);
-        if (FAILED(hr)) continue;
-        
-        // Convert and queue for processing
-        if (framesPerPacket > 0) {
-            AudioPacket packet;
-            packet.frames = framesPerPacket;
-            packet.sampleRate = mixFormat_->nSamplesPerSec;
-            const int srcCh = mixFormat_->nChannels;
 
-            std::vector<float> floats(framesPerPacket * srcCh);
-            ConvertToFloat(buffer.data(), floats.data(), framesPerPacket, mixFormat_);
+        UINT32 packetsThisWake = 0;
+        UINT32 readsThisWake = 0;
+        if (drainPid) diagnostics_.pidWakeups.fetch_add(1, std::memory_order_relaxed);
+        do {
+            if (drainPid) {
+                UINT32 nextPacketFrames = 0;
+                const HRESULT sizeHr = captureClient_->GetNextPacketSize(&nextPacketFrames);
+                if (FAILED(sizeHr)) {
+                    diagnostics_.pidNextPacketSizeErrors.fetch_add(1, std::memory_order_relaxed);
+                    break;
+                }
+                if (nextPacketFrames == 0) break;
+                if (shouldStop_.load()) break;
+            }
 
-            if (srcCh == 2) {
-                packet.channels = 2;
-                packet.data = std::move(floats);
+            UINT32 framesPerPacket = 0;
+            HRESULT hr = captureClient_->GetBuffer(&data, &framesPerPacket, &flags, &devicePosition, &qpcPosition);
+        
+            if (hr == AUDCLNT_S_BUFFER_EMPTY) {
+                diagnostics_.emptyReads.fetch_add(1, std::memory_order_relaxed);
+                break;
+            }
+
+            if (FAILED(hr)) {
+                diagnostics_.readErrors.fetch_add(1, std::memory_order_relaxed);
+                break;
+            }
+            if (drainPid) ++readsThisWake;
+
+            if (framesPerPacket > 0) {
+                diagnostics_.capturedPackets.fetch_add(1, std::memory_order_relaxed);
+                diagnostics_.capturedFrames.fetch_add(framesPerPacket, std::memory_order_relaxed);
+                RecordMin(diagnostics_.packetMin, framesPerPacket);
+                RecordMax(diagnostics_.packetMax, framesPerPacket);
+                const auto now = std::chrono::steady_clock::now();
+                if (lastPacketTime != std::chrono::steady_clock::time_point{})
+                    RecordMax(diagnostics_.packetGapMaxMs,
+                        std::chrono::duration_cast<std::chrono::milliseconds>(now - lastPacketTime).count());
+                lastPacketTime = now;
+            }
+            if (flags & AUDCLNT_BUFFERFLAGS_SILENT)
+                diagnostics_.silentPackets.fetch_add(1, std::memory_order_relaxed);
+            if (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY)
+                diagnostics_.discontinuities.fetch_add(1, std::memory_order_relaxed);
+            if (flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR)
+                diagnostics_.timestampErrors.fetch_add(1, std::memory_order_relaxed);
+            if (framesPerPacket > 0 &&
+                !(flags & (AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY | AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR))) {
+                if (hasExpectedPosition && devicePosition > expectedPosition) {
+                    diagnostics_.positionGapEvents.fetch_add(1, std::memory_order_relaxed);
+                    diagnostics_.positionGapFrames.fetch_add(devicePosition - expectedPosition, std::memory_order_relaxed);
+                }
+                expectedPosition = devicePosition + framesPerPacket;
+                hasExpectedPosition = true;
             } else {
-                // Normalize to stereo: the JS/WebAudio consumer always pairs
-                // samples as L/R. Mono → duplicate; >2 → keep first two channels.
-                packet.channels = 2;
-                packet.data.resize(framesPerPacket * 2);
-                if (srcCh == 1) {
-                    for (UINT32 i = 0; i < framesPerPacket; ++i) {
-                        packet.data[2 * i] = floats[i];
-                        packet.data[2 * i + 1] = floats[i];
-                    }
+                hasExpectedPosition = false;
+            }
+        
+            if (FAILED(hr) || data == nullptr) {
+                diagnostics_.readErrors.fetch_add(1, std::memory_order_relaxed);
+                if (drainPid && framesPerPacket > 0 &&
+                    FAILED(captureClient_->ReleaseBuffer(framesPerPacket))) {
+                    diagnostics_.releaseErrors.fetch_add(1, std::memory_order_relaxed);
+                }
+                break;
+            }
+        
+            if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
+                // Silence - fill with zeros
+                std::fill(buffer.begin(), buffer.end(), 0);
+            } else {
+                // Copy data (buffer is sized for the worst case, so it always fits)
+                size_t bytesToCopy = framesPerPacket * mixFormat_->nBlockAlign;
+                memcpy(buffer.data(), data, bytesToCopy);
+            }
+        
+            hr = captureClient_->ReleaseBuffer(framesPerPacket);
+            if (FAILED(hr)) {
+                diagnostics_.releaseErrors.fetch_add(1, std::memory_order_relaxed);
+                break;
+            }
+        
+            // Convert and queue for processing
+            if (framesPerPacket > 0) {
+                AudioPacket packet;
+                packet.frames = framesPerPacket;
+                packet.sampleRate = mixFormat_->nSamplesPerSec;
+                const int srcCh = mixFormat_->nChannels;
+
+                std::vector<float> floats(framesPerPacket * srcCh);
+                ConvertToFloat(buffer.data(), floats.data(), framesPerPacket, mixFormat_);
+
+                if (srcCh == 2) {
+                    packet.channels = 2;
+                    packet.data = std::move(floats);
                 } else {
-                    for (UINT32 i = 0; i < framesPerPacket; ++i) {
-                        packet.data[2 * i] = floats[i * srcCh];
-                        packet.data[2 * i + 1] = floats[i * srcCh + 1];
+                    // Normalize to stereo: the JS/WebAudio consumer always pairs
+                    // samples as L/R. Mono → duplicate; >2 → keep first two channels.
+                    packet.channels = 2;
+                    packet.data.resize(framesPerPacket * 2);
+                    if (srcCh == 1) {
+                        for (UINT32 i = 0; i < framesPerPacket; ++i) {
+                            packet.data[2 * i] = floats[i];
+                            packet.data[2 * i + 1] = floats[i];
+                        }
+                    } else {
+                        for (UINT32 i = 0; i < framesPerPacket; ++i) {
+                            packet.data[2 * i] = floats[i * srcCh];
+                            packet.data[2 * i + 1] = floats[i * srcCh + 1];
+                        }
                     }
                 }
-            }
 
-            {
-                std::lock_guard<std::mutex> lock(queueMutex_);
-                packetQueue_.push(std::move(packet));
+                {
+                    std::lock_guard<std::mutex> lock(queueMutex_);
+                    packetQueue_.push(std::move(packet));
+                    RecordMax(diagnostics_.queueMax, packetQueue_.size());
+                }
+                queueCond_.notify_one();
             }
-            queueCond_.notify_one();
+            if (drainPid && framesPerPacket > 0) ++packetsThisWake;
+        } while (drainPid && !shouldStop_.load() && readsThisWake < kMaxPidPacketsPerWake);
+        if (drainPid) {
+            diagnostics_.pidDrainedPackets.fetch_add(packetsThisWake, std::memory_order_relaxed);
+            RecordMax(diagnostics_.pidMaxPacketsPerWake, packetsThisWake);
+            if (packetsThisWake > 1)
+                diagnostics_.pidMultiPacketWakeups.fetch_add(1, std::memory_order_relaxed);
         }
     }
 }
@@ -548,14 +640,13 @@ int WasapiLoopbackCapture::GetChannels() const {
 }
 
 void WasapiLoopbackCapture::ProcessingThread() {
-    // Coalesce packets: 1 TSFN/IPC call per buffer period caps throughput at
-    // ~10.5ms/packet → the renderer only receives ~45.7k samples/s and the
-    // worklet's jitter buffer bleeds (audio "cuts" while it refills). Batching
-    // ~2000 frames (~41ms) per callback cuts per-packet overhead ~4× and lets
-    // the full 48k/s through (probe with idle renderer proved 10ms cadence is
-    // possible; live renderers are busier and stretch it).
-    static constexpr size_t kBatchFrames = 2000;
-    static constexpr auto kBatchTimeout = std::chrono::milliseconds(40);
+    // Coalesce packets: each TSFN→IPC→renderer hop costs a fixed ~0.5ms;
+    // with 2000-frame batches that was a ~1.3% delivery deficit that slowly
+    // drained the worklet's jitter buffer (periodic audible refill cuts).
+    // 4000 frames (~83ms) halves the relative overhead to ~0.6%, well within
+    // the worklet's adaptive resampler absorption range (±1%).
+    static constexpr size_t kBatchFrames = 4000;
+    static constexpr auto kBatchTimeout = std::chrono::milliseconds(85);
     auto lastFlush = std::chrono::steady_clock::now();
     std::vector<float> accumulator;
     size_t batchFrames = 0;
@@ -584,6 +675,7 @@ void WasapiLoopbackCapture::ProcessingThread() {
                 batchRate = packet.sampleRate;
             }
             batchFrames += packet.frames;
+            diagnostics_.batchInputFrames.fetch_add(packet.frames, std::memory_order_relaxed);
             accumulator.insert(accumulator.end(), packet.data.begin(), packet.data.end());
         }
 
@@ -594,12 +686,66 @@ void WasapiLoopbackCapture::ProcessingThread() {
             if (dataCallback_) {
                 dataCallback_(accumulator.data(), static_cast<UINT32>(batchFrames),
                               batchChannels, batchRate);
+                diagnostics_.callbackFrames.fetch_add(batchFrames, std::memory_order_relaxed);
+                diagnostics_.callbackBatches.fetch_add(1, std::memory_order_relaxed);
+                RecordMin(diagnostics_.batchMin, batchFrames);
+                RecordMax(diagnostics_.batchMax, batchFrames);
             }
             accumulator.clear();
             batchFrames = 0;
             lastFlush = std::chrono::steady_clock::now();
         }
     }
+}
+
+void WasapiLoopbackCapture::RecordThreadsafeCall(size_t frames, bool accepted) {
+    if (accepted) diagnostics_.tsfnAcceptedFrames.fetch_add(frames, std::memory_order_relaxed);
+    else diagnostics_.tsfnFailures.fetch_add(1, std::memory_order_relaxed);
+}
+
+void WasapiLoopbackCapture::DiagnosticsThread() {
+    const auto started = std::chrono::steady_clock::now();
+    auto report = [this, started]() {
+        const auto get = [](const std::atomic<uint64_t>& n) { return n.load(std::memory_order_relaxed); };
+        std::cerr << "[WASAPI] mode=" << (config_.processId ? "PID" : "system")
+                  << " elapsedMs=" << std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::steady_clock::now() - started).count()
+                  << " wake=" << (eventDriven_ ? "event" : "poll")
+                  << " rate=" << GetSampleRate() << "Hz"
+                  << " capFrames=" << get(diagnostics_.capturedFrames)
+                  << " packets=" << get(diagnostics_.capturedPackets)
+                  << " packetFramesMinMax=" << get(diagnostics_.packetMin) << '/' << get(diagnostics_.packetMax)
+                  << " packetGapMaxMs=" << get(diagnostics_.packetGapMaxMs)
+                  << " empty=" << get(diagnostics_.emptyReads)
+                  << " readErr=" << get(diagnostics_.readErrors)
+                  << " releaseErr=" << get(diagnostics_.releaseErrors)
+                  << " silent=" << get(diagnostics_.silentPackets)
+                  << " discontinuity=" << get(diagnostics_.discontinuities)
+                  << " timestampErr=" << get(diagnostics_.timestampErrors)
+                  << " positionGapEvents=" << get(diagnostics_.positionGapEvents)
+                  << " positionGapFrames=" << get(diagnostics_.positionGapFrames)
+                  << " batchInFrames=" << get(diagnostics_.batchInputFrames)
+                  << " callbackFrames=" << get(diagnostics_.callbackFrames)
+                  << " batches=" << get(diagnostics_.callbackBatches)
+                  << " batchFramesMinMax=" << get(diagnostics_.batchMin) << '/' << get(diagnostics_.batchMax)
+                  << " queueMaxPackets=" << get(diagnostics_.queueMax)
+                  << " tsfnAcceptedFrames=" << get(diagnostics_.tsfnAcceptedFrames)
+                  << " tsfnFailures=" << get(diagnostics_.tsfnFailures)
+                  << " pidWakeups=" << get(diagnostics_.pidWakeups)
+                  << " pidDrainedPackets=" << get(diagnostics_.pidDrainedPackets)
+                  << " pidMaxPacketsPerWake=" << get(diagnostics_.pidMaxPacketsPerWake)
+                  << " pidMultiPacketWakeups=" << get(diagnostics_.pidMultiPacketWakeups)
+                  << " pidNextPacketSizeErrors=" << get(diagnostics_.pidNextPacketSizeErrors)
+                  << std::endl;
+    };
+    std::unique_lock<std::mutex> lock(diagnosticsMutex_);
+    while (diagnosticsActive_.load()) {
+        if (diagnosticsCond_.wait_for(lock, std::chrono::seconds(5), [this] {
+                return !diagnosticsActive_.load();
+            })) break;
+        report();
+    }
+    report(); // Final totals after the capture and processing threads have stopped.
 }
 
 void WasapiLoopbackCapture::ConvertToFloat(const BYTE* source, float* dest, UINT32 frames, WAVEFORMATEX* format) {
@@ -899,9 +1045,11 @@ Napi::Value SetAudioCallback(const Napi::CallbackInfo& info) {
     
     // Set callback on capture instance
     if (g_captureInstance) {
-        g_captureInstance->SetDataCallback([](const float* data, size_t frames, int channels, int sampleRate) {
+        auto* capture = g_captureInstance;
+        capture->SetDataCallback([capture](const float* data, size_t frames, int channels, int sampleRate) {
             // Call thread-safe function (non-blocking)
-            g_audioCallback.NonBlockingCall(new std::vector<float>(data, data + frames * channels));
+            const auto status = g_audioCallback.NonBlockingCall(new std::vector<float>(data, data + frames * channels));
+            capture->RecordThreadsafeCall(frames, status == napi_ok);
         });
     }
     

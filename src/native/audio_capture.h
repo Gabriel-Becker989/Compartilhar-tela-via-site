@@ -72,6 +72,9 @@ public:
     int GetSampleRate() const;
     int GetChannels() const;
 
+    // Diagnostic counters only; called by the existing Node-API callback.
+    void RecordThreadsafeCall(size_t frames, bool accepted);
+
 private:
     // Internal capture thread function
     void CaptureThread();
@@ -127,6 +130,25 @@ private:
     std::condition_variable queueCond_;
     std::thread processingThread_;
     std::atomic<bool> processingActive_{false};
+
+    struct Diagnostics {
+        std::atomic<uint64_t> capturedFrames{0}, capturedPackets{0};
+        std::atomic<uint64_t> packetMin{0}, packetMax{0}, packetGapMaxMs{0};
+        std::atomic<uint64_t> emptyReads{0}, readErrors{0}, releaseErrors{0};
+        std::atomic<uint64_t> silentPackets{0}, discontinuities{0}, timestampErrors{0};
+        std::atomic<uint64_t> positionGapEvents{0}, positionGapFrames{0};
+        std::atomic<uint64_t> batchInputFrames{0}, callbackFrames{0}, callbackBatches{0};
+        std::atomic<uint64_t> batchMin{0}, batchMax{0}, queueMax{0};
+        std::atomic<uint64_t> tsfnAcceptedFrames{0}, tsfnFailures{0};
+        std::atomic<uint64_t> pidWakeups{0}, pidDrainedPackets{0};
+        std::atomic<uint64_t> pidMaxPacketsPerWake{0}, pidMultiPacketWakeups{0};
+        std::atomic<uint64_t> pidNextPacketSizeErrors{0};
+    } diagnostics_;
+    std::atomic<bool> diagnosticsActive_{false};
+    std::thread diagnosticsThread_;
+    std::mutex diagnosticsMutex_;
+    std::condition_variable diagnosticsCond_;
+    void DiagnosticsThread();
     
     void ProcessingThread();
 };
