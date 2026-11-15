@@ -432,6 +432,31 @@ const QUALITY_FALLBACK_CHAIN = {
     '480p30': []
 };
 
+// ============================================================================
+// EXPERIMENTAL: H.264 High no envio (DESLIGADO por padrão)
+// ============================================================================
+// O servidor LiveKit responde ao publicador com H.264 Constrained Baseline
+// (profile-level-id=42e01f). No Windows esse perfil só tem encoder por
+// software (OpenH264); com High (64001f) o Chromium usa o encoder da placa
+// (Media Foundation). Esta opção reescreve só o perfil nas RESPOSTAS SDP
+// recebidas — o caso do publicador —, mantendo o payload type. Quem assiste
+// continua negociando Baseline e precisa decodificar High.
+// Ativar:    localStorage.setItem('collab.h264High', '1')  e recarregar.
+// Desativar: localStorage.removeItem('collab.h264High')    e recarregar.
+(function enableH264HighIfRequested() {
+    let enabled = false;
+    try { enabled = localStorage.getItem('collab.h264High') === '1'; } catch (_) {}
+    if (!enabled || typeof RTCPeerConnection === 'undefined') return;
+    const originalSetRemote = RTCPeerConnection.prototype.setRemoteDescription;
+    RTCPeerConnection.prototype.setRemoteDescription = function (desc, ...rest) {
+        if (desc && desc.type === 'answer' && typeof desc.sdp === 'string' && desc.sdp.includes('profile-level-id=42e01f')) {
+            desc = { type: 'answer', sdp: desc.sdp.replace(/profile-level-id=42e01f/g, 'profile-level-id=64001f') };
+        }
+        return originalSetRemote.call(this, desc, ...rest);
+    };
+    console.log('[Share] Experimental ATIVO: H.264 High no envio (collab.h264High=1)');
+})();
+
 /**
  * Get quality preset with encoding parameters
  * @param {string} qualityKey - e.g., '1080p60', '720p30'
