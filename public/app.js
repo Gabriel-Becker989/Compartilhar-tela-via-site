@@ -363,7 +363,7 @@ async function createAudioTrackFromNative(sampleRate) {
             if (e.data && e.data.type === 'stats') {
                 const s = e.data;
                 const ringMs = s.ringAvailable != null ? (s.ringAvailable / 2 / s.sampleRate * 1000).toFixed(0) : '?';
-                console.log(`[Worklet] rate=${s.sampleRate} recv=${s.receivedSamples} cons=${s.consumedSamples} drift=${s.drift} buf=${ringMs}ms underruns=${s.underrunCount} maxGap=${(s.maxGapSamples / 2 / s.sampleRate * 1000).toFixed(0)}ms refills=${s.refills}(${(s.refillSamples / s.sampleRate * 1000).toFixed(0)}ms) drops=${s.dropCount}`);
+                console.log(`[Worklet] rate=${s.sampleRate} recv=${s.receivedSamples} cons=${s.consumedSamples} drift=${s.drift} buf=${ringMs}ms underruns=${s.underrunCount} maxGap=${(s.maxGapSamples / 2 / s.sampleRate * 1000).toFixed(0)}ms refills=${s.refills}(${(s.refillSamples / s.sampleRate * 1000).toFixed(0)}ms) trims=${s.trims ?? 0}(${((s.trimSamples || 0) / 2 / s.sampleRate * 1000).toFixed(0)}ms) drops=${s.dropCount}`);
             }
         };
         audioWorkletNode.connect(destination);
@@ -742,6 +742,16 @@ async function startShareFlow(qualityKey) {
     if (!myRoom) return;
 
     try {
+        // Escolhe a fonte ANTES de ligar o áudio. O getSources do seletor
+        // (miniaturas) trava o processo principal por ~1 s; com o áudio já
+        // ligado, esse áudio represado chegava de uma vez e virava ~0,5 s de
+        // atraso fixo no worklet durante toda a transmissão.
+        if (!selectedScreenSourceId) {
+            const source = await showSourcePicker();
+            if (!source) throw new Error('Nenhuma fonte selecionada');
+            selectedScreenSourceId = source.id;
+        }
+
         // Best-effort audio capture: audio failures must NOT block video sharing
         let audioResult = { success: false, track: null };
         let audioError = null;

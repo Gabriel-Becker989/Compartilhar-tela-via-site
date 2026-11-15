@@ -13,7 +13,10 @@
  *     crítico, evitando pausas desnecessárias.
  *   - Refill target em ~150ms (era 300ms): pausa menor quando ocorre.
  *
- *  Telemetria: underruns, drops, refills reportados a cada 5s.
+ *  Excesso: fila > ~300 ms por ~2 s seguidos é cortada de volta a ~150 ms
+ *  (evita que uma rajada após travamento vire atraso fixo).
+ *
+ *  Telemetria: underruns, drops, refills e trims reportados a cada 5s.
  *  ===================================================================== */
 
 class PCMProcessor extends AudioWorkletProcessor {
@@ -41,6 +44,16 @@ class PCMProcessor extends AudioWorkletProcessor {
     this.inRefill = false;
     this.refills = 0;
     this.refillSamples = 0;
+
+    // Proteção contra atraso acumulado: se a fila passar de ~300 ms e ficar
+    // assim por ~2 s seguidos (ex.: rajada depois de um travamento do processo
+    // principal), descarta o excesso de uma vez e volta ao alvo de ~150 ms.
+    // Sem isso, qualquer rajada vira atraso fixo pelo resto da transmissão.
+    this.excessHighSamples = Math.round(0.300 * this.sampleRate) * 2;   // ~28800 @48kHz
+    this.excessHoldFrames = Math.round(2.0 * this.sampleRate);         // ~2 s de process()
+    this.excessFrames = 0;
+    this.trims = 0;
+    this.trimSamples = 0;
 
     // Telemetria
     this.receivedSamples = 0;
@@ -160,6 +173,21 @@ class PCMProcessor extends AudioWorkletProcessor {
       return true;
     }
 
+    // Excesso sustentado: descarta até o alvo (uma descontinuidade única).
+    if (this.available > this.excessHighSamples) {
+      this.excessFrames += frames;
+      if (this.excessFrames >= this.excessHoldFrames) {
+        let excess = this.available - this.refillTargetSamples;
+        excess -= excess % 2; // mantém o alinhamento L/R
+        this.readHead = (this.readHead + excess) & (this.ringSize - 1);
+        this.trims++;
+        this.trimSamples += excess;
+        this.excessFrames = 0;
+      }
+    } else {
+      this.excessFrames = 0;
+    }
+
     // Leitura normal — sem alocação.
     this.readFrames(outputL, outputR, frames);
     this.maybeReportStats();
@@ -181,6 +209,8 @@ class PCMProcessor extends AudioWorkletProcessor {
         maxGapSamples: this.maxGapSamples,
         refills: this.refills,
         refillSamples: this.refillSamples,
+        trims: this.trims,
+        trimSamples: this.trimSamples,
         drift: this.receivedSamples - this.consumedSamples,
         ringAvailable: this.available,
         ringSize: this.ringSize,
