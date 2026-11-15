@@ -109,6 +109,40 @@ O refill de arranque visto na parte 1 não se repetiu, o que reforça a leitura 
 - Smoke test de `win-unpacked\compartilhar-tela-collab.exe` em modo isolado: o addon carregado (lista de módulos) é o de `app.asar.unpacked`, `isCapturing=false`, sem sala, **código de saída 0**.
 - Avisos do builder: sem `author` no `package.json` e ícone padrão do Electron. `livekit-server-sdk` (dependência da função Vercel) vai junto no asar em `node_modules`, sem uso no app; avaliar depois.
 
+## Atualização 14/11/2026 — atraso e dessincronia na live (Claude Code)
+
+**Relato do proprietário (app instalado, Valorant/LoL, 720p e 1080p60, sistema e PID):** áudio e vídeo bons, mas ≈1,2 s de atraso em relação ao tempo real e áudio dessincronizado do vídeo.
+
+**Log do emissor (≈19 min, 1080p60, PID, console com script de `getStats`):**
+- Worklet: `buf` fixo entre 589 e 679 ms do início ao fim, 0 underruns/refills/drops. Nos testes isolados era 98–179 ms.
+- Vídeo: ≈20 fps (11–35), `qualityLimitationReason=cpu` em 221/223 amostras, encode mediano ≈37 ms/frame (provável encoder por software; implementação do encoder não registrada).
+- Rede: RTT ≈10 ms, fila de envio mediana 12 ms (p95 47, máx. 153), banda estimada mediana ≈5,5 Mbps.
+- Não houve log do espectador; a maior parte do 1,2 s do vídeo não está no emissor.
+
+**Causa do buffer de ≈630 ms — confirmada em teste isolado (PID, 60 s, sem sala, addon 3B normal):** `startShareFlow` liga o áudio (`app.js:749`) antes do seletor de fonte (`app.js:592`), cujo `getSources` (miniaturas, 904 ms no teste) trava o processo principal; o áudio represado chega de uma vez antes do fim do prime e o worklet, sem controle de excesso, mantém esse atraso para sempre. Controle (sem `getSources`): `buf` 98–168 ms. Com `getSources` logo após o start: `buf` 607–687 ms. Ambos com 0 underruns/refills/drops e saída 0.
+
+**Correção aplicada (aprovada pelo proprietário, ainda não commitada):**
+1. `public/app.js` / `startShareFlow`: abre o seletor e fixa `selectedScreenSourceId` **antes** de `startAudioCapture`. Cancelar o seletor segue o mesmo caminho de erro de antes ("Nenhuma fonte selecionada"). A troca de qualidade durante a live continua chamando `stopScreenShare` → `startShareFlow`, que reabre o seletor como antes.
+2. `public/audio-worklet.js`: se a fila ficar acima de ~300 ms por ~2 s seguidos, descarta o excesso de uma vez até o alvo de ~150 ms (uma descontinuidade). Novos contadores `trims`/`trimSamples` no relatório; o log `[Worklet]` mostra `trims=N(ms)`. Prime, refill e tamanho do ring não mudaram.
+
+**Validação (isolado, PID 60 s, sem sala, addon 3B normal, saída 0 em todas):**
+
+| Cenário | `buf` (12 relatórios) | underruns / drops | refills | trims |
+|---|---|---|---|---|
+| Controle (só liga o áudio) | 87–167 ms | 0 / 0 | 2 (19 ms, só nos primeiros 5 s) | 0 |
+| Rajada (áudio e logo `getSources`, 848 ms) | 105–195 ms (antes da correção: 607–687) | 0 / 0 | 0 | 1 (483 ms descartados) |
+| Nova ordem (`getSources` e depois o áudio) | 89–169 ms | 0 / 0 | 1 (21 ms, só nos primeiros 5 s) | 0 |
+
+`test-presets.js` depois da correção: saída 0, resultados iguais aos anteriores. Os refills de arranque já apareciam antes da correção (parte 1 da 3C) e não são causados pelo trim. **Não testado:** o `startShareFlow` completo (exige sala) e uma live real; o instalador de `dist-3c` **não** contém esta correção (é preciso gerar outro para testar instalado).
+
+**Live real com a correção (15/11/2026, proprietário, `npm run dev`, 720p60, ≈33 min, log só do emissor):**
+- Worklet: `buf` 88–188 ms (mediana 138) do início ao fim, **0 trims**, 0 underruns, 0 drops; 3 refills somando 40 ms (1 no arranque, 2 ao longo da live, ≈3 e ≈13 min). Antes da correção: `buf` 589–679 ms fixo.
+- Vídeo: `encoderImplementation=OpenH264`, `powerEfficientEncoder=false` (encoder por **software**, mesmo com GPU ligada); fps mediano 51 (p5 37, máx. 58), encode mediano 12,8 ms, `limite=cpu` em 20/394 amostras. Na live anterior em 1080p60 (instalado) o mesmo encoder ficava em ≈20 fps limitado por CPU.
+- Rede: RTT ≈11 ms, fila de envio mediana 0,4 ms (p95 4,4), banda estimada mediana ≈5,2 Mbps.
+- Sem log do espectador outra vez.
+
+**Ainda a fazer:** percepção do proprietário sobre atraso/sincronia nesta live; log do espectador; avaliar encoder H.264 por hardware (Media Foundation) para 1080p60; commit da correção.
+
 **Ainda pendente:** instalar e testar o instalador (proprietário); corrigir `build:win`/`rebuild` no `package.json` (com aprovação) para usar o fluxo validado acima; `npm start` e transmissão real com o addon promovido (pelo proprietário ou com autorização própria); sessão longa; corrigir `rebuild`/`build:win`, que **continuam podendo sobrescrever** o addon promovido (para refazer, use o backup `incoming\`); validar o instalador. Nada foi commitado; `build/` é ignorado pelo git.
 
 Para arquitetura, histórico, limites das evidências, logs e detalhes das fases, consulte `RELATORIO_CONTINUIDADE_PROJETO.md`.
