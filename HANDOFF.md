@@ -141,7 +141,36 @@ O refill de arranque visto na parte 1 não se repetiu, o que reforça a leitura 
 - Rede: RTT ≈11 ms, fila de envio mediana 0,4 ms (p95 4,4), banda estimada mediana ≈5,2 Mbps.
 - Sem log do espectador outra vez.
 
-**Ainda a fazer:** percepção do proprietário sobre atraso/sincronia nesta live; log do espectador; avaliar encoder H.264 por hardware (Media Foundation) para 1080p60; commit da correção.
+**Percepção do proprietário nessa live:** atraso e dessincronia **semelhantes aos anteriores**, apesar de o áudio ter saído ≈0,5 s mais cedo no emissor. Espectador assistiu pelo site num tablet; sem log. Logo, a maior parte do atraso/dessincronia não está no buffer do emissor.
+
+## Atualização 15/11/2026 — codificador de vídeo por hardware (Claude Code, autorizado)
+
+**Método:** script externo (scratchpad, `encoder-test.js`) em modo isolado, sem sala e sem áudio: captura a tela 1 com o preset 1080p60 do app (`captureScreenStream`) e codifica numa conexão WebRTC local (dois `RTCPeerConnection` na própria página), 6 Mbps / 60 fps, `maintain-resolution`, 10 s de medição após 5 s de aquecimento. Todas as rodadas com código de saída 0.
+
+**GPU:** NVIDIA (vendor 0x10DE, device 0x1F06), driver 32.0.16.1692; `video_encode=enabled`; a lista `videoEncoding` do `SystemInfo` vem vazia (não é confiável para decidir).
+
+| Codec / perfil H.264 | Flags | Encoder | HW | fps (1080p) | encode/frame |
+|---|---|---|---|---|---|
+| H.264 Constrained Baseline `42e01f` (o que a live usa) | — | OpenH264 | não | 33,3 / 55,3 | 29,3 / 12,3 ms |
+| H.264 CBP `42e01f` | `--enable-features=MediaFoundationH264CbpEncoding` | OpenH264 | não | 52,2 | 14,2 ms |
+| H.264 Main `4d001f` | — | **MediaFoundationVideoEncodeAccelerator** | **sim** | 48,6 | 5,5 ms |
+| H.264 High `64001f` | — | **MediaFoundationVideoEncodeAccelerator** | **sim** | 51,2 | 5,4 ms |
+| H.264 High `64001f` | feature CBP acima | MediaFoundationVideoEncodeAccelerator | sim | 57,1 | 5,5 ms |
+| VP8 | — | libvpx | não | 56,6 | 4,7 ms |
+
+Decodificação H.264 local: `ExternalDecoder (D3D11VideoDecoder)`, por hardware. O OpenH264 varia muito com a carga da CPU (12–29 ms sem jogo; ≈37 ms na live de 1080p60 com jogo). O encoder da placa ficou em ≈5,5 ms em todas as rodadas.
+
+**Conclusão:** o Electron 28 já usa o encoder da placa **sem flags**, desde que o perfil H.264 negociado seja Main ou High. O LiveKit/negociação atual acaba em Constrained Baseline, que só tem encoder por software nesta máquina. A feature `MediaFoundationH264CbpEncoding` não mudou isso.
+
+**Leitura do `livekit-client` 2.24.1 (versão servida pela CDN em 15/11/2026):** o cliente não chama `setCodecPreferences` nem escolhe perfil; só confere o tipo (`h264`) contra `enabledPublishCodecs` do servidor. O perfil sai da resposta SDP do servidor (provavelmente o H.264 padrão do LiveKit, CBP `42e01f`; ainda não confirmado na sala real).
+
+**Implementado (aprovado, ainda não commitado):**
+- `public/index.html`: `livekit-client` fixado em `@2.24.1` (antes sem versão).
+- `public/app.js`: opção experimental **desligada por padrão** que, com `localStorage['collab.h264High']==='1'`, reescreve `profile-level-id=42e01f` → `64001f` nas respostas SDP (`setRemoteDescription` com `type==='answer'`), mantendo o PT. Ativar: `localStorage.setItem('collab.h264High','1')` e recarregar; desativar: `localStorage.removeItem('collab.h264High')`. Mostra `[Share] Experimental ATIVO…` no console quando ligada.
+
+**Validação local (isolado, sem sala, loopback WebRTC, 1080p60, saída 0):** padrão → `LivekitClient.version=2.24.1`, sem patch, OpenH264 (17,2 ms/frame); com a opção → patch ativo, negociado `64001f`, **MediaFoundationVideoEncodeAccelerator** (5,6 ms/frame, ≈49 fps), receptor que negociou CBP decodificou via D3D11 sem erro. `test-presets.js` sem mudança. **Não testado:** sala real com o LiveKit Cloud e decodificação no tablet do espectador.
+
+**Próximo passo proposto (na época, não implementado):** fazer a publicação negociar H.264 High/Main (verificar como a versão do `livekit-client` em uso trata as preferências de perfil; hoje a CDN não tem versão fixada) e validar a compatibilidade do tablet/navegador do espectador. Alternativa sem depender de perfil: VP8 (software, mas leve nesta máquina). Para o atraso no espectador: instrumentar a página do site (ex.: painel de estatísticas por parâmetro na URL), o que exige publicar o site.
 
 **Ainda pendente:** instalar e testar o instalador (proprietário); corrigir `build:win`/`rebuild` no `package.json` (com aprovação) para usar o fluxo validado acima; `npm start` e transmissão real com o addon promovido (pelo proprietário ou com autorização própria); sessão longa; corrigir `rebuild`/`build:win`, que **continuam podendo sobrescrever** o addon promovido (para refazer, use o backup `incoming\`); validar o instalador. Nada foi commitado; `build/` é ignorado pelo git.
 
