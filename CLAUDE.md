@@ -18,7 +18,8 @@ App Electron para compartilhar tela inteira ou uma janela com o áudio daquele p
 
 ## Proibições e cuidados
 
-- **Nunca rode `npm run rebuild` nem `npm run build:win`.** Eles executam `node-gyp rebuild` sem alvo Electron e podem sobrescrever `build/Release/wasi_audio.node`. Para compilar o addon use apenas `npm run build:native:electron:isolated` (saída fora do repositório).
+- **Compilar o addon:** só com `npm run build:native:electron:isolated` (saída fora do repositório); trocar o binário em `build/Release` exige backup e autorização. `npm run rebuild` está desativado (só imprime aviso e sai com código 1).
+- **Gerar instalador:** `npm run build:win` empacota sem compilar nada (`prebuild:win` mostra o SHA-256 do addon; `npmRebuild: false`) e grava em `dist-release/`. Não use `node-gyp rebuild` diretamente na raiz.
 - **Não substitua, mova ou apague nada em `build/`** sem autorização explícita do proprietário nesta conversa. A promoção do addon (Etapa 3C) exige backup verificado, hashes e plano de reversão aprovados antes.
 - Não descarte, restaure, agrupe ou commite as alterações locais sem revisão e pedido explícito.
 - Não leia nem exponha `.env`, senhas ou tokens. Não cole segredos em logs ou documentos.
@@ -28,7 +29,7 @@ App Electron para compartilhar tela inteira ou uma janela com o áudio daquele p
 
 ## Como rodar e testar
 
-- App normal: `npm start` (carrega o addon de `build/Release/`, hoje o **antigo**).
+- App normal: `npm start` (carrega o addon de `build/Release/`, hoje o **3B**, SHA-256 `2FDF4E35…98C0`). Atenção: `npm start` usa `--disable-gpu`; para testes de vídeo prefira `npm run dev`.
 - Com DevTools: `npm run dev`.
 - **Modo isolado** (perfil Electron temporário, não toca nos dados normais):
   - `COLLAB_ISOLATED_RUN=1 npx electron .`
@@ -39,9 +40,9 @@ App Electron para compartilhar tela inteira ou uma janela com o áudio daquele p
 
 ## Pendências conhecidas
 
-- Etapa 3C: promover o addon PID Drain corrigido (2M validado em runtime, 3B só estático) ao caminho normal, com backup e reversão. Escolha do artefato é do proprietário.
-- Confirmar se os presets de vídeo 480p, 720p e 1080p (`public/app.js`) entregam a resolução e o FPS esperados.
-- Validar o instalador (`build:win`, `asarUnpack`) depois de corrigir o fluxo de build.
+- Feito (ver `HANDOFF.md`): Etapa 3C (3B promovido com backup), presets de vídeo medidos (`scripts/test-presets.js`), fluxo de build corrigido e instalador validado (`asarUnpack`, sem `.env`), correções de atraso do áudio e de sincronia validadas em live.
+- Validar a opção experimental H.264 High (`localStorage['collab.h264High']`) numa live com o proprietário transmitindo.
+- Republicar o site na Vercel para os espectadores pelo navegador usarem o `livekit-client@2.24.1` fixado.
 - Não há executor de testes automatizado ainda. Adicionar Playwright ou qualquer dependência ao `package.json` precisa de aprovação.
 
 ## Forma de trabalho
