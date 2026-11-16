@@ -666,6 +666,11 @@ async function shareScreenWithFallback(qualityKey, audioTrack) {
                 simulcast: false,
                 videoCodec: 'h264',     // prefere encode/decode com aceleração de hardware
                 dtx: true,
+                // Mesmo "stream" do áudio abaixo: o servidor agrupa as duas trilhas no
+                // mesmo MediaStream do espectador, e só assim o navegador sincroniza
+                // áudio e vídeo (lip-sync). Sem isso, áudio "Microphone" e vídeo
+                // "ScreenShare" caem em grupos diferentes e chegam cada um no seu tempo.
+                stream: 'screen',
             });
 
             // 4. Publish audio track separately (as microphone-like track)
@@ -680,6 +685,7 @@ async function shareScreenWithFallback(qualityKey, audioTrack) {
                     // mais importante do que economia de banda.
                     dtx: false,
                     red: true, // Opus: redundância contra perda de pacote
+                    stream: 'screen', // mesmo grupo do vídeo (ver publishTrack do vídeo acima)
                 });
             }
 
