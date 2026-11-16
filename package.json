@@ -6,9 +6,10 @@
   "scripts": {
     "start": "electron . --disable-gpu --disable-gpu-compositing --no-sandbox",
     "dev": "electron . --dev",
-    "rebuild": "node-gyp rebuild",
+    "rebuild": "node -e \"console.error('Desativado: use npm run build:native:electron:isolated (saida fora do repo) e promova o addon com backup, ver HANDOFF.md'); process.exit(1)\"",
     "build:native:electron:isolated": "node scripts/build-native-electron-isolated.js",
-    "build:win": "node-gyp rebuild && electron-builder --win",
+    "prebuild:win": "node scripts/check-addon.js",
+    "build:win": "electron-builder --win",
     "build:linux": "electron-builder --linux AppImage"
   },
   "dependencies": {
@@ -22,6 +23,10 @@
   },
   "build": {
     "appId": "com.screenshare.collab",
+    "npmRebuild": false,
+    "directories": {
+      "output": "dist-release"
+    },
     "files": [
       "main.js",
       "preload.js",
