@@ -42,6 +42,10 @@ const VERCEL_API_URL = window.location.protocol.startsWith('http')
 ? ''
 : 'https://compartilhar-tela-via-site.vercel.app';
 
+// Pelo navegador só dá para assistir: a captura de tela e de áudio depende do app (preload do Electron).
+const IS_DESKTOP_APP = !!(window.electronAPI && window.electronAPI.getSources);
+document.documentElement.classList.add(IS_DESKTOP_APP ? 'is-app' : 'is-browser');
+
 const DEFAULT_AVATAR = 'data:image/svg+xml;utf8,' + encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">' +
   '<rect width="100" height="100" fill="%235865f2"/>' +
@@ -130,6 +134,10 @@ let screenShareStream = null;
 let screenSharePublication = null;
 let screenShareAudioPublication = null;
 let selectedScreenSourceId = null;
+// Dados mostrados no painel "Sua transmissão" (só interface)
+let currentShareSource = null;      // { name, type }
+let currentShareAudio = null;       // 'ok' | 'none' | 'failed'
+let currentShareQualityUsed = null;
 
 async function loadProcessList() {
     try {
@@ -145,6 +153,10 @@ async function loadProcessList() {
                 audioProcessSelect.appendChild(option);
             });
             audioCaptureState.processList = processes;
+            // Mantém visível o processo já escolhido (a lista é recriada a cada atualização)
+            if (audioCaptureState.selectedProcessId) {
+                audioProcessSelect.value = String(audioCaptureState.selectedProcessId);
+            }
         }
     } catch (err) {
         console.error('Erro ao carregar processos:', err);
@@ -166,13 +178,63 @@ function updateAudioUI() {
     // Update status badge
     if (audioStatusBadge) {
         const labels = {
-            'window': `🎮 Janela: ${audioCaptureState.selectedProcessId ? audioCaptureState.processList.find(p => p.processId === audioCaptureState.selectedProcessId)?.processName || `PID ${audioCaptureState.selectedProcessId}` : 'Selecione...'}`,
-            'system': '🔊 Som do Sistema',
-            'none': '🔇 Sem Áudio'
+            'window': `Janela: ${audioCaptureState.selectedProcessId ? audioCaptureState.processList.find(p => p.processId === audioCaptureState.selectedProcessId)?.processName || `PID ${audioCaptureState.selectedProcessId}` : 'Selecione...'}`,
+            'system': 'Som do sistema',
+            'none': 'Sem áudio'
         };
         audioStatusBadge.textContent = labels[source] || 'Áudio';
         audioStatusBadge.className = 'audio-status-badge ' + (source === 'none' ? 'muted' : '');
     }
+
+    syncAudioChoiceButtons();
+}
+
+// Botões "Só de um programa / Som do sistema / Sem áudio" da janela de compartilhar.
+// Eles só mudam a <select id="audio-source-select"> escondida; a lógica continua a mesma.
+const AUDIO_CHOICE_HINTS = {
+    window: 'Seus amigos ouvem só o programa escolhido, sem notificações nem música de fundo.',
+    system: 'Tudo o que toca no seu computador vai para a sala.',
+    none: 'Só imagem, sem som.'
+};
+let audioChoiceTouched = false;
+
+function syncAudioChoiceButtons() {
+    const current = audioCaptureState.selectedSource;
+    document.querySelectorAll('.segmented-btn[data-audio]').forEach((btn) => {
+        const on = btn.dataset.audio === current;
+        btn.classList.toggle('active', on);
+        btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+    const hint = document.getElementById('audio-choice-hint');
+    if (hint) hint.textContent = AUDIO_CHOICE_HINTS[current] || '';
+}
+
+document.querySelectorAll('.segmented-btn[data-audio]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+        if (!audioSourceSelect) return;
+        audioChoiceTouched = true;
+        audioSourceSelect.value = btn.dataset.audio;
+        audioSourceSelect.dispatchEvent(new Event('change'));
+    });
+});
+
+// Ao escolher uma janela, tenta marcar o processo dela para o áudio (pelo título da janela).
+// Só age se a pessoa ainda não escolheu o áudio nesta abertura da janela.
+let autoMatchToken = 0;
+async function autoMatchAudioToWindow(source) {
+    const token = ++autoMatchToken;
+    if (audioChoiceTouched || !source || !source.name) return;
+    await loadProcessList();
+    if (token !== autoMatchToken || audioChoiceTouched) return;
+    const name = source.name.trim();
+    const match = (audioCaptureState.processList || []).find(
+        (p) => (p.windowTitle || '').trim() === name
+    );
+    if (!match) return;
+    audioCaptureState.selectedSource = 'window';
+    audioCaptureState.selectedProcessId = match.processId;
+    if (audioSourceSelect) audioSourceSelect.value = 'window';
+    updateAudioUI();
 }
 
 // Initialize audio source selector
@@ -488,18 +550,53 @@ function showSourcePicker() {
         const grid = document.getElementById('source-picker-grid');
         const closeBtn = document.getElementById('source-picker-close');
         const cancelBtn = document.getElementById('source-picker-cancel');
+        const startBtn = document.getElementById('source-picker-start');
+        const selectedLabel = document.getElementById('source-picker-selected');
         const tabs = document.querySelectorAll('.source-tab');
         let allSources = [];
         let currentTab = 'screen';
+        let selected = null;
 
         if (!modal || !grid) { resolve(null); return; }
+
+        audioChoiceTouched = false;
+
+        const setSelected = (source) => {
+            selected = source;
+            if (selectedLabel) selectedLabel.textContent = source ? source.name : 'nada escolhido ainda';
+            if (startBtn) startBtn.disabled = !source;
+            grid.querySelectorAll('.source-item').forEach((el) => {
+                const on = !!source && el.dataset.sourceId === source.id;
+                el.classList.toggle('selected', on);
+                el.setAttribute('aria-pressed', on ? 'true' : 'false');
+            });
+        };
 
         let resolved = false;
         const done = (source) => {
             if (resolved) return;
             resolved = true;
             modal.classList.add('hidden');
+            closeBtn.removeEventListener('click', onCancel);
+            cancelBtn.removeEventListener('click', onCancel);
+            if (startBtn) startBtn.removeEventListener('click', onStart);
+            modal.removeEventListener('click', onBackdrop);
+            tabs.forEach((tab) => tab.removeEventListener('click', onTab));
             resolve(source);
+        };
+
+        const onCancel = () => done(null);
+        const onStart = () => {
+            if (!selected) return;
+            selectedScreenSourceId = selected.id;
+            currentShareSource = {
+                name: selected.name,
+                type: selected.id.startsWith('window') ? 'Janela' : 'Tela inteira'
+            };
+            done(selected);
+        };
+        const onBackdrop = (e) => {
+            if (e.target === modal) done(null);
         };
 
         const render = () => {
@@ -516,14 +613,17 @@ function showSourcePicker() {
 
             grid.innerHTML = '';
             filtered.forEach(source => {
-                const item = document.createElement('div');
+                const item = document.createElement('button');
+                item.type = 'button';
                 item.className = 'source-item';
+                item.dataset.sourceId = source.id;
+                item.setAttribute('aria-pressed', 'false');
 
                 const img = document.createElement('img');
                 img.src = source.thumbnail || 'data:image/svg+xml;utf8,' + encodeURIComponent(
-                    '<svg xmlns="http://www.w3.org/2000/svg" width="300" height="150"><rect width="100%" height="100%" fill="%23232329"/><text x="50%" y="50%" text-anchor="middle" fill="%235865f2" font-size="40" font-family="sans-serif">🖥️</text></svg>'
+                    '<svg xmlns="http://www.w3.org/2000/svg" width="300" height="150"><rect width="100%" height="100%" fill="#232329"/><text x="50%" y="50%" text-anchor="middle" dominant-baseline="middle" fill="#8A8C99" font-size="16" font-family="sans-serif">Sem prévia</text></svg>'
                 );
-                img.alt = source.name;
+                img.alt = '';
 
                 const span = document.createElement('span');
                 span.textContent = source.name;
@@ -533,31 +633,34 @@ function showSourcePicker() {
                 item.appendChild(span);
 
                 item.addEventListener('click', () => {
-                    selectedScreenSourceId = source.id;
-                    done(source);
+                    setSelected(source);
+                    if (source.id.startsWith('window')) autoMatchAudioToWindow(source);
                 });
 
                 grid.appendChild(item);
             });
+            setSelected(selected && filtered.some(s => s.id === selected.id) ? selected : null);
         };
 
-        // Close handlers
-        closeBtn.addEventListener('click', () => done(null));
-        cancelBtn.addEventListener('click', () => done(null));
-        modal.addEventListener('click', (e) => {
-            if (e.target === modal) done(null);
+        const onTab = (e) => {
+            const tab = e.currentTarget;
+            tabs.forEach(t => t.classList.remove('active'));
+            tab.classList.add('active');
+            currentTab = tab.dataset.type;
+            render();
+        };
+
+        closeBtn.addEventListener('click', onCancel);
+        cancelBtn.addEventListener('click', onCancel);
+        if (startBtn) startBtn.addEventListener('click', onStart);
+        modal.addEventListener('click', onBackdrop);
+        tabs.forEach((tab) => {
+            tab.classList.toggle('active', tab.dataset.type === currentTab);
+            tab.addEventListener('click', onTab);
         });
 
-        // Tab switching
-        tabs.forEach(tab => {
-            tab.addEventListener('click', () => {
-                tabs.forEach(t => t.classList.remove('active'));
-                tab.classList.add('active');
-                currentTab = tab.dataset.type;
-                render();
-            });
-        });
-
+        setSelected(null);
+        syncAudioChoiceButtons();
         modal.classList.remove('hidden');
 
         // Load sources
@@ -751,6 +854,7 @@ async function stopScreenShare() {
         if (btnShare) btnShare.classList.remove('hidden');
         
         updateAudioStatusBadge(false);
+        updateParticipantsUI();
         
         // Hide effective quality badge
         if (effectiveQualityBadge) {
@@ -763,8 +867,11 @@ async function stopScreenShare() {
 }
 
 function updateAudioStatusBadge(isActive) {
+    const liveStatus = document.getElementById('live-status');
+    if (liveStatus) liveStatus.classList.toggle('hidden', !isActive);
+    updateLivePanel(isActive);
     if (audioStatusBadge) {
-        audioStatusBadge.textContent = isActive ? '🔴 AO VIVO' : '⭕ PARADO';
+        audioStatusBadge.textContent = isActive ? 'AO VIVO' : 'PARADO';
         audioStatusBadge.className = 'audio-status-badge ' + (isActive ? 'live' : 'stopped');
     }
 }
@@ -783,6 +890,9 @@ async function startShareFlow(qualityKey) {
             selectedScreenSourceId = source.id;
         }
 
+        // A qualidade agora é escolhida dentro da janela de compartilhar
+        if (!qualityKey) qualityKey = qualitySelect ? qualitySelect.value : '720p30';
+
         // Best-effort audio capture: audio failures must NOT block video sharing
         let audioResult = { success: false, track: null };
         let audioError = null;
@@ -792,18 +902,24 @@ async function startShareFlow(qualityKey) {
             audioError = err;
             console.warn('[Share] Áudio indisponível, continuando sem áudio:', err);
         }
+        currentShareAudio = audioError ? 'failed'
+            : (audioCaptureState.selectedSource === 'none' ? 'none' : 'ok');
 
         // Use fallback mechanism
         const result = await shareScreenWithFallback(qualityKey, audioResult.track || null);
 
         if (result.success) {
+            currentShareQualityUsed = result.qualityUsed;
+            const liveQualitySelect = document.getElementById('live-quality-select');
+            if (liveQualitySelect) liveQualitySelect.value = qualityKey;
             btnShare.classList.add('hidden');
             if (btnStop) btnStop.classList.remove('hidden');
             updateAudioStatusBadge(true);
+            updateParticipantsUI();
 
             // Update effective quality badge
             if (effectiveQualityBadge) {
-                effectiveQualityBadge.textContent = `📹 ${result.qualityUsed}`;
+                effectiveQualityBadge.textContent = `Em uso: ${result.qualityUsed}`;
                 effectiveQualityBadge.classList.remove('hidden');
                 effectiveQualityBadge.className = 'effective-quality-badge';
             }
@@ -813,14 +929,17 @@ async function startShareFlow(qualityKey) {
                 showRoomError(`Qualidade ajustada automaticamente para ${result.qualityUsed}`);
             }
             if (audioError) {
-                showRoomError('⚠️ Áudio indisponível (' + (audioError.message || 'erro').split('\n')[0] + '). A transmissão segue sem som.');
+                showRoomError('Áudio indisponível (' + (audioError.message || 'erro').split('\n')[0] + '). A transmissão segue sem som.');
             }
         } else {
             throw result.error || new Error('Falha ao iniciar compartilhamento');
         }
     } catch (err) {
         console.error('Erro ao compartilhar tela com áudio:', err);
-        showRoomError('Erro ao iniciar compartilhamento: ' + err.message.split('\n')[0]);
+        // Fechar a janela de escolha (Cancelar/X) não é erro: não mostra aviso
+        if (err.message !== 'Nenhuma fonte selecionada') {
+            showRoomError('Erro ao iniciar compartilhamento: ' + err.message.split('\n')[0]);
+        }
         // Clean up: release any capture that may have started, and force the
         // source picker to re-open on the next attempt.
         try { await stopAudioCapture(); } catch (e) {}
@@ -834,7 +953,7 @@ async function startShareFlow(qualityKey) {
 if (btnShare) {
     btnShare.addEventListener('click', () => {
         if (!myRoom) return;
-        startShareFlow(qualitySelect ? qualitySelect.value : '720p30');
+        startShareFlow(null);
     });
 }
 
@@ -845,7 +964,10 @@ if (qualitySelect) {
         if (!wasSharing || !myRoom) return;
         const newQuality = qualitySelect.value;
         console.log(`[Share] Qualidade alterada para: ${newQuality}`);
+        // Mantém a mesma tela/janela (stopScreenShare limpa a escolha) para não reabrir a janela de escolha
+        const keepSourceId = selectedScreenSourceId;
         await stopScreenShare();
+        selectedScreenSourceId = keepSourceId;
         await startShareFlow(newQuality);
     });
 }
@@ -860,11 +982,84 @@ if (btnStop) {
     });
 }
 
+// ─── Painel "Sua transmissão" (só para quem está ao vivo) ──────────
+function describeShareAudio() {
+    if (currentShareAudio === 'failed') return 'Indisponível (segue sem som)';
+    if (currentShareAudio === 'none') return 'Sem áudio';
+    if (audioCaptureState.selectedSource === 'system') return 'Som do sistema';
+    if (audioCaptureState.selectedSource === 'window') {
+        const pid = audioCaptureState.selectedProcessId;
+        const proc = (audioCaptureState.processList || []).find(p => p.processId === pid);
+        return proc ? `Só ${proc.processName}` : `Só o processo ${pid}`;
+    }
+    return '—';
+}
+
+function updateLivePanel(isActive) {
+    const panel = document.getElementById('live-panel');
+    if (!panel) return;
+    panel.classList.toggle('hidden', !isActive);
+    if (!isActive) return;
+    const set = (id, text) => { const el = document.getElementById(id); if (el) el.textContent = text; };
+    set('live-source-name', currentShareSource ? currentShareSource.name : '—');
+    set('live-source-type', currentShareSource ? currentShareSource.type : '');
+    set('live-audio', describeShareAudio());
+    set('live-quality-used', currentShareQualityUsed || '—');
+    panel.querySelectorAll('select, button').forEach(el => { el.disabled = false; });
+}
+
+function lockLivePanel() {
+    const panel = document.getElementById('live-panel');
+    if (panel) panel.querySelectorAll('select, button').forEach(el => { el.disabled = true; });
+}
+
+const liveQualitySelectEl = document.getElementById('live-quality-select');
+if (liveQualitySelectEl && qualitySelect) {
+    // Usa o mesmo caminho de antes: muda #quality-select e dispara o 'change' dela
+    liveQualitySelectEl.addEventListener('change', () => {
+        lockLivePanel();
+        qualitySelect.value = liveQualitySelectEl.value;
+        qualitySelect.dispatchEvent(new Event('change'));
+    });
+}
+
+const liveChangeSourceBtn = document.getElementById('live-change-source');
+if (liveChangeSourceBtn) {
+    // Para a transmissão atual e abre a janela de escolha de novo
+    liveChangeSourceBtn.addEventListener('click', async () => {
+        lockLivePanel();
+        try {
+            await stopScreenShare();
+        } catch (err) {
+            console.error('Erro ao parar compartilhamento:', err);
+        }
+        startShareFlow(null);
+    });
+}
+
+const liveStopBtn = document.getElementById('live-stop');
+if (liveStopBtn && btnStop) {
+    liveStopBtn.addEventListener('click', () => btnStop.click());
+}
+
 // ============================================================================
 // ORIGINAL CODE (LOGIN, ROOM, PARTICIPANTS, ETC.)
 // ============================================================================
 
 // ─── Login ──────────────────────────────────────────────
+// Mostrar/esconder a senha na tela de entrada (só interface)
+const togglePasswordBtn = document.getElementById('toggle-password');
+if (togglePasswordBtn && passwordInput) {
+  togglePasswordBtn.addEventListener('click', () => {
+    const show = passwordInput.type === 'password';
+    passwordInput.type = show ? 'text' : 'password';
+    const label = show ? 'Esconder senha' : 'Mostrar senha';
+    togglePasswordBtn.setAttribute('aria-label', label);
+    togglePasswordBtn.title = label;
+    togglePasswordBtn.classList.toggle('active', show);
+  });
+}
+
 if (joinBtn) {
   joinBtn.addEventListener('click', async () => {
     const participantName = nameInput ? nameInput.value.trim() : '';
@@ -948,6 +1143,13 @@ async function iniciarLogin(roomName, participantName, password, avatarDataUrl) 
   }
 }
 
+// Ícones dos controles do vídeo (SVG estático, sem dados externos)
+const SVG_OPEN = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">';
+const ICON_VOLUME = SVG_OPEN + '<path d="M11 5 6 9H2v6h4l5 4V5z"></path><path d="M15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14"></path></svg>';
+const ICON_VOLUME_MUTED = SVG_OPEN + '<path d="M11 5 6 9H2v6h4l5 4V5z"></path><path d="M22 9l-6 6M16 9l6 6"></path></svg>';
+const ICON_FULLSCREEN = SVG_OPEN + '<path d="M8 3H5a2 2 0 0 0-2 2v3M21 8V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3M16 21h3a2 2 0 0 0 2-2v-3"></path></svg>';
+const ICON_FULLSCREEN_EXIT = SVG_OPEN + '<path d="M8 3v3a2 2 0 0 1-2 2H3M21 8h-3a2 2 0 0 1-2-2V3M3 16h3a2 2 0 0 1 2 2v3M16 21v-3a2 2 0 0 1 2-2h3"></path></svg>';
+
 // ─── Criação e Remoção de Quadrados de Vídeo ────────────────
 function renderTrack(track, participant) {
   if (emptyState) emptyState.classList.add('hidden');
@@ -970,61 +1172,99 @@ function renderTrack(track, participant) {
 
     wrapper.appendChild(tag);
 
-    const overlay = document.createElement('div');
-    overlay.className = 'video-overlay';
+    // Controles no canto inferior direito; aparecem ao passar o mouse (ver style.css)
+    const controls = document.createElement('div');
+    controls.className = 'video-controls';
 
-    const controlsTop = document.createElement('div');
-    controlsTop.className = 'video-controls-top';
+    const volGroup = document.createElement('div');
+    volGroup.className = 'volume-group';
 
-    const volContainer = document.createElement('div');
-    volContainer.className = 'volume-container';
+    const volPopover = document.createElement('div');
+    volPopover.className = 'volume-popover';
 
-    const btnMute = document.createElement('button');
-    btnMute.className = 'overlay-btn';
-    btnMute.textContent = '🔊';
+    const volValue = document.createElement('span');
+    volValue.className = 'volume-value';
+
+    const sliderTrack = document.createElement('div');
+    sliderTrack.className = 'volume-slider-track';
 
     const slider = document.createElement('input');
     slider.type = 'range';
+    slider.className = 'volume-slider';
     slider.min = '0';
     slider.max = '1';
     slider.step = '0.05';
     slider.value = '1';
+    slider.setAttribute('aria-label', 'Volume');
 
-    volContainer.appendChild(btnMute);
-    volContainer.appendChild(slider);
+    sliderTrack.appendChild(slider);
+    volPopover.appendChild(volValue);
+    volPopover.appendChild(sliderTrack);
+
+    const btnMute = document.createElement('button');
+    btnMute.type = 'button';
+    btnMute.className = 'overlay-btn';
+
+    volGroup.appendChild(volPopover);
+    volGroup.appendChild(btnMute);
 
     const btnFullscreen = document.createElement('button');
+    btnFullscreen.type = 'button';
     btnFullscreen.className = 'overlay-btn';
-    btnFullscreen.textContent = '⛶';
 
-    controlsTop.appendChild(volContainer);
-    controlsTop.appendChild(btnFullscreen);
-    overlay.appendChild(controlsTop);
-    wrapper.appendChild(overlay);
+    controls.appendChild(volGroup);
+    controls.appendChild(btnFullscreen);
+    wrapper.appendChild(controls);
 
     const videoEl = document.createElement('video');
     videoEl.autoplay = true;
     videoEl.playsInline = true;
     wrapper.appendChild(videoEl);
 
+    const updateVolumeUI = () => {
+      const silent = videoEl.muted || videoEl.volume === 0;
+      btnMute.innerHTML = silent ? ICON_VOLUME_MUTED : ICON_VOLUME;
+      const label = silent ? 'Ativar som' : 'Silenciar';
+      btnMute.title = label;
+      btnMute.setAttribute('aria-label', label);
+      volValue.textContent = String(Math.round((videoEl.muted ? 0 : videoEl.volume) * 100));
+    };
+
+    const updateFullscreenUI = () => {
+      const isFull = document.fullscreenElement === wrapper;
+      btnFullscreen.innerHTML = isFull ? ICON_FULLSCREEN_EXIT : ICON_FULLSCREEN;
+      const label = isFull ? 'Sair da tela cheia' : 'Tela cheia';
+      btnFullscreen.title = label;
+      btnFullscreen.setAttribute('aria-label', label);
+    };
+
     slider.addEventListener('input', (e) => {
-      videoEl.volume = e.target.value;
-      btnMute.textContent = e.target.value == 0 ? '🔇' : '🔊';
+      videoEl.volume = Number(e.target.value);
+      if (videoEl.volume > 0) videoEl.muted = false;
+      updateVolumeUI();
     });
 
     btnMute.addEventListener('click', () => {
       videoEl.muted = !videoEl.muted;
-      btnMute.textContent = videoEl.muted ? '🔇' : '🔊';
       slider.value = videoEl.muted ? 0 : videoEl.volume;
+      updateVolumeUI();
     });
 
     btnFullscreen.addEventListener('click', () => {
-      if (!document.fullscreenElement) {
-        wrapper.requestFullscreen().catch(err => console.error(err));
+      if (document.fullscreenElement !== wrapper) {
+        wrapper.requestFullscreen().catch(err => console.error('[fullscreen]', err));
       } else {
-        document.exitFullscreen();
+        document.exitFullscreen().catch(err => console.error('[fullscreen]', err));
       }
     });
+
+    wrapper.addEventListener('fullscreenchange', updateFullscreenUI);
+    wrapper.addEventListener('dblclick', (e) => {
+      if (e.target === videoEl) btnFullscreen.click();
+    });
+
+    updateVolumeUI();
+    updateFullscreenUI();
 
     videoGrid.appendChild(wrapper);
   }
@@ -1085,6 +1325,81 @@ function disconnectRoom() {
 }
 
 // ─── Lista de Participantes e Botão Independente ─────────────
+function hasScreenSharePublication(participant) {
+  let found = false;
+  participant.videoTrackPublications.forEach((pub) => {
+    if (pub.source === LivekitClient.Track.Source.ScreenShare || pub.trackName === 'screen') {
+      found = true;
+    }
+  });
+  return found;
+}
+
+// Monta a linha de um participante: foto, nome e situação ("Transmitindo", "Na sala"...)
+function buildParticipantRow(participant, displayName, statusText, isLive, isWatching) {
+  const li = document.createElement('li');
+  if (isWatching) li.classList.add('watching');
+
+  const info = document.createElement('span');
+  info.className = 'participant-info';
+
+  const avatar = createParticipantAvatar(participant);
+  if (isLive) avatar.classList.add('live');
+  info.appendChild(avatar);
+
+  const text = document.createElement('span');
+  text.className = 'participant-text';
+
+  const nameSpan = document.createElement('span');
+  nameSpan.className = 'participant-name-text';
+  nameSpan.textContent = displayName;
+  text.appendChild(nameSpan);
+
+  const statusSpan = document.createElement('span');
+  statusSpan.className = 'participant-status' + (isLive ? ' live' : '');
+  statusSpan.textContent = statusText;
+  text.appendChild(statusSpan);
+
+  info.appendChild(text);
+  li.appendChild(info);
+  return li;
+}
+
+// ─── Barra lateral: modo compacto (lembrado neste computador) ───────
+const SIDEBAR_COMPACT_KEY = 'collab.sidebarCompact';
+const ICON_SIDEBAR_COLLAPSE = '<svg class="ui-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M15 4v16M8 10l2 2-2 2"></path></svg>';
+const ICON_SIDEBAR_EXPAND = '<svg class="ui-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M15 4v16M10 10l-2 2 2 2"></path></svg>';
+
+function setSidebarCompact(on, remember) {
+  const sidebarEl = document.getElementById('sidebar');
+  const toggle = document.getElementById('sidebar-toggle');
+  if (!sidebarEl) return;
+  sidebarEl.classList.toggle('compact', on);
+  if (toggle) {
+    const label = on ? 'Expandir barra lateral' : 'Compactar barra lateral';
+    toggle.innerHTML = on ? ICON_SIDEBAR_EXPAND : ICON_SIDEBAR_COLLAPSE;
+    toggle.setAttribute('aria-label', label);
+    toggle.title = label;
+    toggle.setAttribute('aria-expanded', on ? 'false' : 'true');
+  }
+  if (remember) {
+    try { localStorage.setItem(SIDEBAR_COMPACT_KEY, on ? '1' : '0'); } catch (_) { /* sem armazenamento: só não lembra */ }
+  }
+}
+
+(function initSidebarCompact() {
+  let saved = false;
+  try { saved = localStorage.getItem(SIDEBAR_COMPACT_KEY) === '1'; } catch (_) { saved = false; }
+  setSidebarCompact(saved, false);
+  const toggle = document.getElementById('sidebar-toggle');
+  const sidebarEl = document.getElementById('sidebar');
+  if (toggle && sidebarEl) {
+    toggle.addEventListener('click', () => setSidebarCompact(!sidebarEl.classList.contains('compact'), true));
+  }
+  const mini = document.getElementById('live-panel-mini');
+  if (mini) mini.addEventListener('click', () => setSidebarCompact(false, true));
+})();
+
 function updateParticipantsUI() {
   if (!partList || !myRoom) return;
   partList.innerHTML = '';
@@ -1093,18 +1408,14 @@ function updateParticipantsUI() {
   // 1. Participante Local (Você)
   if (myRoom.localParticipant) {
     totalOnline++;
-    const li = document.createElement('li');
-
-    const info = document.createElement('span');
-    info.className = 'participant-info';
-    info.appendChild(createParticipantAvatar(myRoom.localParticipant));
-
-    const nameSpan = document.createElement('span');
-    nameSpan.className = 'participant-name-text';
-    nameSpan.textContent = `${myRoom.localParticipant.identity} (Você)`;
-    info.appendChild(nameSpan);
-
-    li.appendChild(info);
+    const isLive = hasScreenSharePublication(myRoom.localParticipant);
+    const li = buildParticipantRow(
+      myRoom.localParticipant,
+      `${myRoom.localParticipant.identity} (Você)`,
+      isLive ? 'Transmitindo' : 'Na sala',
+      isLive,
+      false
+    );
     partList.appendChild(li);
   }
 
@@ -1112,25 +1423,15 @@ function updateParticipantsUI() {
   if (myRoom.remoteParticipants) {
     myRoom.remoteParticipants.forEach((participant) => {
       totalOnline++;
-      const li = document.createElement('li');
-
-      const info = document.createElement('span');
-      info.className = 'participant-info';
-      info.appendChild(createParticipantAvatar(participant));
-
-      const nameSpan = document.createElement('span');
-      nameSpan.className = 'participant-name-text';
-      nameSpan.textContent = participant.identity;
-      info.appendChild(nameSpan);
-
-      li.appendChild(info);
-
-      let hasScreenShare = false;
-      participant.videoTrackPublications.forEach((pub) => {
-        if (pub.source === LivekitClient.Track.Source.ScreenShare || pub.trackName === 'screen') {
-          hasScreenShare = true;
-        }
-      });
+      const hasScreenShare = hasScreenSharePublication(participant);
+      const watching = hasScreenShare && activeSubscribedSids.has(participant.sid);
+      const li = buildParticipantRow(
+        participant,
+        participant.identity,
+        hasScreenShare ? (watching ? 'Assistindo' : 'Transmitindo') : 'Na sala',
+        hasScreenShare,
+        watching
+      );
 
       if (hasScreenShare) {
         const watchBtn = document.createElement('button');
@@ -1138,7 +1439,8 @@ function updateParticipantsUI() {
 
         if (isWatching) {
           watchBtn.className = 'btn-watch-stream stop';
-          watchBtn.textContent = '❌';
+          watchBtn.type = 'button';
+          watchBtn.textContent = 'Parar';
           watchBtn.title = 'Parar de assistir transmissão';
 
           watchBtn.addEventListener('click', () => {
@@ -1150,7 +1452,8 @@ function updateParticipantsUI() {
           });
         } else {
           watchBtn.className = 'btn-watch-stream start';
-          watchBtn.textContent = '🎥';
+          watchBtn.type = 'button';
+          watchBtn.textContent = 'Assistir';
           watchBtn.title = 'Clique para assistir a transmissão';
 
           watchBtn.addEventListener('click', () => {
@@ -1168,6 +1471,16 @@ function updateParticipantsUI() {
         }
 
         li.appendChild(watchBtn);
+
+        // Modo compacto: o botão vira um selo sobre a foto e a linha inteira é clicável
+        const who = participant.identity;
+        watchBtn.setAttribute('aria-label', isWatching ? `Parar de assistir ${who}` : `Assistir ${who}`);
+        li.title = `${who}: ${isWatching ? 'assistindo (clique para parar)' : 'transmitindo (clique para assistir)'}`;
+        li.addEventListener('click', (e) => {
+          if (e.target === watchBtn) return;
+          const sidebarEl = document.getElementById('sidebar');
+          if (sidebarEl && sidebarEl.classList.contains('compact')) watchBtn.click();
+        });
       }
 
       partList.appendChild(li);
@@ -1175,6 +1488,8 @@ function updateParticipantsUI() {
   }
 
   if (partCount) partCount.textContent = `${totalOnline} online`;
+  const sidebarCount = document.getElementById('sidebar-count');
+  if (sidebarCount) sidebarCount.textContent = ` · ${totalOnline}`;
 }
 
 function showLoginError(msg) {

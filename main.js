@@ -353,7 +353,8 @@ app.whenReady().then(() => {
             'mediaCapture',
             'display-capture',
             'audioCapture',
-            'videoCapture'
+            'videoCapture',
+            'fullscreen'
         ].includes(permission);
         callback(allowed);
     });

@@ -24,6 +24,7 @@ App Electron para compartilhar tela inteira ou uma janela com o áudio daquele p
 - Não descarte, restaure, agrupe ou commite as alterações locais sem revisão e pedido explícito.
 - Não leia nem exponha `.env`, senhas ou tokens. Não cole segredos em logs ou documentos.
 - Não acesse o volume `H:`. Não limpe `dist*/`, o arquivo `-` na raiz, perfis Electron, backups ou pastas temporárias de testes anteriores.
+  - Em 16/11/2026, a pedido do proprietário, as pastas `dist`, `dist2`–`dist13`, `dist-3c` e `dist-linux` foram para a Lixeira. Restam `dist-release` (16/11) e `dist-20261115` (15/11, instalador validado em live). Não apague essas duas nem gere uma nova `dist*` sem necessidade.
 - Não retome a investigação das mini travadas de WebRTC nem mexa em buffers, temporizações, LiveKit ou vídeo como efeito colateral de outra tarefa. Isso foi adiado pelo proprietário.
 - Não contorne restrições de segurança do sistema ou do Claude Code.
 

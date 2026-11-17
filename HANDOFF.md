@@ -195,3 +195,183 @@ Decodificação H.264 local: `ExternalDecoder (D3D11VideoDecoder)`, por hardware
 **Ainda pendente:** instalar e testar o instalador (proprietário); corrigir `build:win`/`rebuild` no `package.json` (com aprovação) para usar o fluxo validado acima; `npm start` e transmissão real com o addon promovido (pelo proprietário ou com autorização própria); sessão longa; corrigir `rebuild`/`build:win`, que **continuam podendo sobrescrever** o addon promovido (para refazer, use o backup `incoming\`); validar o instalador. Nada foi commitado; `build/` é ignorado pelo git.
 
 Para arquitetura, histórico, limites das evidências, logs e detalhes das fases, consulte `RELATORIO_CONTINUIDADE_PROJETO.md`.
+
+## Atualização 16/11/2026 — tela cheia e controles do vídeo (Claude, aprovado pelo proprietário)
+
+**Problema:** o botão de tela cheia do espectador não fazia nada no app. Causa (leitura do código): `main.js` libera em `setPermissionRequestHandler` só as permissões de captura/mídia; `fullscreen` também passa por esse handler, era negada e o `requestFullscreen()` rejeitava em silêncio (erro só no console). No site pelo navegador o handler não existe.
+
+**Alterações (não commitadas):**
+- `main.js`: `'fullscreen'` acrescentado à lista de permissões liberadas. Nada mais muda no handler.
+- `public/app.js` (`renderTrack` e constantes de ícones logo acima): a barra de cima (`.video-overlay`/`.video-controls-top`/`.volume-container`) virou `.video-controls` no canto inferior direito, com botão de volume e de tela cheia em ícones SVG (sem emoji). A barrinha de volume (`.volume-popover`) sobe a partir do botão. Mesma lógica de volume/mudo de antes, mais: mover a barra acima de 0 tira o mudo; o ícone e o rótulo mudam com mudo/tela cheia (`fullscreenchange`); duplo clique no vídeo alterna tela cheia; `exitFullscreen()` com `.catch`.
+- `public/style.css`: regras antigas do overlay substituídas pelas novas. Controles com `opacity: 0` e aparecem em `.video-wrapper:hover`/`:focus-within`; a barrinha aparece em `.volume-group:hover`/`:focus-within`. A barra é um `range` comum girado −90° (o Chromium 120 do Electron 28 não tem range vertical por `writing-mode`). `.video-wrapper:fullscreen` sem borda/arredondamento.
+
+**Validação feita:** só `node --check` em `app.js` e `main.js` (sintaxe OK) e conferência do diff; fins de linha CRLF preservados. **Não testado rodando:** o terminal no computador do proprietário não iniciou (pouco espaço livre em disco), então não houve `git status`/`git diff --check` nem execução do Electron nesta etapa.
+
+**Próximos passos:** conferir `git status` e `git diff --check`; rodar `COLLAB_ISOLATED_RUN=1 npx electron .` (ou `npm run dev`) e, assistindo uma transmissão, verificar: controles só com o mouse em cima, barrinha subindo, mudo, tela cheia abrindo/fechando (botão, duplo clique e Esc). O site da Vercel precisa ser republicado para os espectadores pelo navegador receberem o visual novo; o instalador precisa ser gerado de novo (`npm run build:win`) para quem usa o app.
+
+## Atualização 16/11/2026 — Etapa 1 da nova interface: cores e ícones (Claude, aprovado pelo proprietário)
+
+Primeira de cinco etapas para levar ao app a proposta de UI revisada no canvas "Screen Share Collab — proposta de UI". Esta etapa é só visual: mesma disposição, mesmos IDs e classes usados pelo JS, sem tocar em áudio, LiveKit, vídeo ou `main.js`.
+
+**Alterações (não commitadas):**
+- `public/style.css`: variáveis de `:root` trocadas pela paleta nova (fundo `#0D0E12`, destaque `#8B92FF` com texto escuro `--accent-text`, vermelho `#FF5C5C`); criadas `--radius-sm` (já era usada sem estar definida), `--accent-text`, `--red-text` e `--font-ui` (fonte do sistema, Segoe UI no Windows; Google Fonts não foi usado porque a CSP não tem `font-src` e o app não deve depender de internet para a fonte). Bloco novo no fim, "ETAPA 1", sobrescreve botões, selos, abas e botões Assistir/Parar; para desfazer, apagar esse bloco e voltar as variáveis.
+- `public/index.html`: emojis trocados por ícones SVG inline (logo, Compartilhar, Parar, Sair, atualizar processos, abas, tela vazia); emojis removidos das opções de áudio; título do modal "O que você quer mostrar?"; `aria-label` no fechar e no atualizar. Nenhum ID, classe ou `value` usado pelo JS mudou.
+- `public/app.js`: só textos: rótulos de áudio sem emoji, selo "AO VIVO"/"PARADO", selo "Em uso: <qualidade>", aviso de áudio indisponível sem emoji, botões da lista de participantes "Assistir"/"Parar" (antes 🎥/❌) com `type="button"`, miniatura de fonte sem prévia com o texto "Sem prévia" no lugar do emoji. Avatar padrão (tubarão) mantido.
+
+**Validação feita:** `node --check public/app.js` OK; CRLF preservado nos três arquivos. **Não testado rodando** (terminal no computador do proprietário indisponível por falta de espaço em disco).
+
+**Observação:** a seção anterior (tela cheia e controles do vídeo) não tinha ficado gravada neste arquivo na primeira tentativa; foi regravada junto com esta.
+
+**Próximos passos:** proprietário abre `npm run dev` e confere entrada, sala (barra de cima, lista de participantes, selos ao transmitir) e a janela de escolher fonte. Depois, Etapa 2: tela de entrada no layout da proposta.
+
+## Atualização 16/11/2026 — Etapa 2 da nova interface: tela de entrada (Claude, aprovado pelo proprietário)
+
+**Contexto informado pelo proprietário:** o app é privado e tem uma sala só (`sala-principal`); não há criação de salas, e a interface não deve sugerir isso.
+
+**Alterações (não commitadas):**
+- `public/index.html`: bloco `#login-screen` reorganizado como na proposta: à esquerda marca, título "Assista junto, com o som certo.", frase e três etiquetas; à direita o cartão "Entrar na sala" com foto (selo de câmera), campos com `<label>` "Seu nome" e "Senha da sala", botão de olho e "Entrar na sala". Mesmos IDs de antes (`avatar-input`, `avatar-preview`, `name-input`, `password-input`, `join-btn`, `login-error`); `src` padrão do avatar e `value` da senha intactos. Sem `<form>` (Enter recarregaria a página). Saíram o selo "LiveKit + WASAPI" e o subtítulo técnico.
+- `public/style.css`: regras da tela de entrada substituídas (seção "LOGIN SCREEN (Etapa 2)"); removidas do bloco "ETAPA 1" as regras da tela de entrada antiga. Em janela estreita os dois lados empilham; `#login-screen` rola se faltar altura.
+- `public/app.js`: único trecho novo, logo acima do listener do `join-btn`: o botão `#toggle-password` alterna `type` do campo de senha entre `password` e `text`. Lógica de login inalterada.
+
+**Fora da proposta, de propósito:** a linha "sala-principal · N pessoas agora" (exigiria consultar a sala antes de entrar, mexendo no `/api/get-token`).
+
+**Validação feita:** `node --check public/app.js` OK; todos os IDs usados pelo JS presentes uma vez; CRLF preservado. **Não testado rodando** (terminal do computador do proprietário indisponível).
+
+**Próximos passos:** proprietário confere a tela de entrada no `npm run dev` (trocar foto, mostrar senha, erro de nome vazio/senha errada, entrar). Depois, Etapa 3: sala (barra de cima enxuta e lista de participantes).
+
+## Atualização 16/11/2026 — Etapa 3 da nova interface: barra de cima e lista de participantes (Claude, aprovado pelo proprietário)
+
+**Alterações (não commitadas):**
+- `public/index.html`: na barra de cima, separador + nome da sala (`#room-name-badge`, agora classe `room-name`) e `#participant-count` com classe `badge-online` (bolinha verde); título da lista "Na sala" com `#sidebar-count`. IDs existentes mantidos.
+- `public/app.js`: `updateParticipantsUI` reorganizada com duas funções novas, `hasScreenSharePublication` e `buildParticipantRow`. Cada linha mostra nome e situação ("Transmitindo", "Transmitindo · assistindo", "Na sala"); quem transmite ganha anel vermelho na foto; a linha que você está assistindo fica destacada (`li.watching`). O participante local mostra "Transmitindo" quando tem publicação de tela. O bloco dos botões Assistir/Parar (assinar/desassinar tracks) foi mantido **sem alteração**. `updateParticipantsUI()` agora também é chamada logo após `updateAudioStatusBadge(true)` (início da transmissão) e `updateAudioStatusBadge(false)` em `stopScreenShare` — só redesenha a lista.
+- `public/style.css`: bloco novo "ETAPA 3" no fim (barra de cima, botão Sair em vermelho discreto, lista com 300 px).
+
+**De propósito sem mudança:** controles de áudio, qualidade e Compartilhar continuam na barra de cima até a Etapa 4; grade de vídeos inalterada (encostaria na parte de vídeo, adiada). "Pelo navegador" do mockup não foi feito (o app não sabe a origem do participante sem mexer no token).
+
+**Validação feita:** `node --check public/app.js` OK; CRLF preservado. **Não testado rodando.** Conferir com duas pessoas: lista, anel vermelho, "assistindo", Assistir/Parar, contagem, e a própria linha mudando ao transmitir/parar.
+
+**Observação sobre este arquivo:** duas gravações anteriores deste `HANDOFF.md` (seções da tela cheia e da Etapa 2) chegaram ao disco sem o trecho acrescentado por último. A causa foi a forma como o Claude transferia o arquivo, não algo do lado do proprietário. Corrigido; as seções foram regravadas juntas e o tamanho final foi conferido no disco.
+
+## Atualização 16/11/2026 — Etapa 4 da nova interface: janela de compartilhar (Claude, aprovado pelo proprietário)
+
+**Alterações (não commitadas):**
+- `public/index.html`: os controles de áudio (`#audio-source-select`, `#audio-process-wrapper`, `#audio-process-select`, `#refresh-processes-btn`) e de qualidade (`#quality-select`) saíram da barra de cima e foram para dentro de `#source-picker-modal`, **com os mesmos IDs**. `#audio-source-select` ficou escondida; três botões (`.segmented-btn[data-audio]`) mudam o valor dela e disparam `change`, então `audioCaptureState` é atualizado pelo mesmo listener de antes. Modal ganhou rodapé "Mostrando: …" e `#source-picker-start` ("Começar a transmitir", desabilitado até escolher). `#btn-share` foi para o cartão "Quer mostrar algo?" no pé da lista. `#audio-status-badge` e `#effective-quality-badge` ficam dentro de `#live-status`, visível só enquanto você transmite. Quem não transmite não vê nenhum controle de transmissão.
+- `public/app.js`:
+  - `showSourcePicker`: clicar numa miniatura só seleciona (borda + ✓); a escolha só vale em "Começar a transmitir". Os ouvintes de fechar/cancelar/abas/fundo agora são removidos ao fechar (antes acumulavam um a mais por abertura). A aba ativa volta para "Telas" a cada abertura. Miniaturas viraram `<button>`.
+  - Novo: `syncAudioChoiceButtons`, `AUDIO_CHOICE_HINTS`, `autoMatchAudioToWindow`. Ao escolher uma **janela**, se algum processo da lista tiver `windowTitle` igual ao nome da janela, o áudio vai para "Só de um programa" com esse processo; não age se a pessoa já mexeu no áudio nessa abertura.
+  - `loadProcessList`: depois de recriar as opções, volta a mostrar o processo já escolhido (antes a lista visual voltava para "Selecione…", embora o estado guardasse o PID).
+  - `startShareFlow`: `#btn-share` chama `startShareFlow(null)`; a qualidade é lida de `#quality-select` **depois** da escolha da fonte. Cancelar a janela não mostra mais o aviso de erro.
+  - `updateAudioStatusBadge`: mostra/esconde `#live-status`.
+  - Lista: situação "Assistindo" (antes "Transmitindo · assistindo", que cortava).
+  - Miniatura sem prévia: o SVG de reserva estava codificado duas vezes (`%23` dentro de `encodeURIComponent`) e saía preto; agora mostra "Sem prévia".
+- `public/style.css`: bloco "ETAPA 4" no fim (modal 880 px, seleção, botões de áudio, rodapé, cartão; o cartão some com `:has(#btn-share.hidden)`).
+
+**Sem mudança:** `startAudioCapture`, `shareScreenWithFallback`, `captureScreenStream`, presets, LiveKit, worklet, `main.js`.
+
+**Limitação temporária:** trocar a qualidade no meio da transmissão não está acessível (a lista está no modal, que só abre antes de transmitir); por enquanto, parar e começar de novo. Volta na Etapa 5 (painel "Você ao vivo").
+
+**Validação feita (fora do repositório, sem Electron, sem LiveKit real):** Chrome headless com Playwright abrindo `public/index.html` por `file://`, `livekit-client` substituído por um stub vazio e `window.electronAPI` simulado (2 telas, 2 janelas, 2 processos). Resultados: botão de olho alterna o tipo; na sala sem transmitir só `#btn-share` visível (`#live-status`, `#btn-stop`, áudio e qualidade ocultos); "Começar" desabilitado até escolher; escolher a janela "Jogo Teste" marcou "Só de um programa" com PID 4321 e o select mostrou 4321; "Sem áudio" escondeu a lista de processos e uma escolha posterior de janela não sobrescreveu a escolha manual; Cancelar fechou sem aviso; reabrindo, aba "Telas" ativa; escolher "Tela 2" + 720p60 + Começar passou `720p60` para `shareScreenWithFallback` (substituída por stub) e mostrou "AO VIVO", "Em uso: 720p60" e Parar, escondendo o cartão; nenhum erro de JS. `node --check` OK; CRLF preservado.
+
+**Ainda não testado:** Electron real, captura de tela/áudio real e sala LiveKit. Próximo: o proprietário transmite de verdade (tela, janela com cada opção de áudio, qualidade, Cancelar, Parar). Depois, Etapa 5: painel "Você ao vivo" (devolve a troca de qualidade durante a transmissão).
+
+## Atualização 16/11/2026 — Etapa 5 da nova interface: painel "Sua transmissão" (Claude, aprovado pelo proprietário)
+
+Última etapa do plano de interface. Com ela, a proposta revisada no canvas está no app, exceto os itens listados em "Fora da proposta".
+
+**Alterações (não commitadas):**
+- `public/index.html`: novo `#live-panel` no pé da lista de participantes (no lugar do cartão "Quer mostrar algo?", que some ao transmitir), com fonte (nome e tipo), áudio, `#live-quality-select` (mesmos presets), "Em uso agora", `#live-change-source` ("Trocar fonte") e `#live-stop` ("Parar transmissão"). A barra de cima continua com "AO VIVO", "Em uso" e Parar.
+- `public/app.js`:
+  - Variáveis só de interface: `currentShareSource`, `currentShareAudio` (`ok`/`none`/`failed`) e `currentShareQualityUsed`, preenchidas no "Começar a transmitir" e em `startShareFlow`.
+  - `updateLivePanel` (chamada por `updateAudioStatusBadge`) mostra, esconde e preenche o painel; `describeShareAudio` monta o texto do áudio.
+  - `#live-quality-select` muda `#quality-select` e dispara o `change` dela, o mesmo caminho de antes para trocar a qualidade no meio da transmissão. **Mudança nesse listener:** ele agora guarda `selectedScreenSourceId` antes de `stopScreenShare()` e o devolve depois. Antes, trocar a qualidade ao vivo reabria a janela de escolha, porque `stopScreenShare` limpa a escolha; agora a mesma tela/janela continua. O áudio é parado e religado com a mesma escolha, como já acontecia.
+  - "Trocar fonte" chama `stopScreenShare()` e `startShareFlow(null)`: há uma interrupção curta e a janela de escolha abre. Se a pessoa cancelar, a transmissão fica parada.
+  - "Parar transmissão" chama `btnStop.click()`.
+  - Durante a troca, os controles do painel ficam desabilitados.
+- `public/style.css`: bloco "ETAPA 5" no fim.
+
+**Fora da proposta, de propósito:**
+- **Prévia local do que você transmite:** exigiria ligar a track de captura a mais um `<video>`, o que mexe na parte de vídeo, adiada pelo proprietário.
+- **"Assistindo você · N":** o cliente LiveKit não informa quem assinou a sua track sem mudança no servidor ou nos metadados.
+- **Medidor de nível de áudio:** exigiria ler o worklet.
+- **"Pelo navegador":** precisaria de informação no token, como já registrado na Etapa 3.
+
+**Validação feita (fora do repositório, Chrome headless + Playwright, `livekit-client` substituído por stub, Electron simulado; `startAudioCapture`/`stopAudioCapture`/`shareScreenWithFallback` substituídas por stubs que só registram as chamadas):**
+- **Escolher janela "Jogo Teste" + Começar:** painel visível com "Jogo Teste / Janela", "Só jogo.exe" e 720p30; cartão de compartilhar escondido; chamadas `audio-start:window` → `share:720p30:window:111:0`.
+- **Qualidade 1080p60 no painel:** `audio-stop` → `audio-start:window` → `share:1080p60:window:111:0`, **sem reabrir a janela**; "Em uso" passou a 1080p60.
+- **Trocar fonte:** `audio-stop` e a janela abriu. Escolhendo "Tela 1" + Som do sistema, o painel mostrou "Tela 1 / Tela inteira / Som do sistema".
+- **Parar transmissão:** painel e selos escondidos, cartão de volta.
+- Nenhum erro de JS. `node --check` OK; CRLF preservado.
+
+**Ainda não testado:** Electron real, captura real e sala LiveKit, em especial a troca de qualidade ao vivo mantendo a fonte.
+
+**Próximos passos:**
+1. O proprietário transmite de verdade: começar, trocar a qualidade no painel, trocar a fonte e parar.
+2. Commit das etapas (pedir autorização).
+3. Gerar o instalador (`npm run build:win`) para os amigos.
+4. Republicar o site na Vercel, para quem assiste pelo navegador ver a interface nova.
+
+## Atualização 16/11/2026 — Barra lateral com modo compacto (Claude, aprovado pelo proprietário)
+
+**Pedido:** deixar a barra lateral mais minimalista para quem não quer compartilhar nem ver a lista. Foram apresentadas três opções (ocultar por completo / compacto / os dois). O proprietário escolheu a **opção 2, modo compacto**.
+
+**Alterações (não commitadas):**
+- `public/index.html`:
+  - O `<h3>` da lista passou para `.sidebar-header`, junto com o botão novo `#sidebar-toggle`.
+  - O texto de `#btn-share` ficou em `<span class="btn-label">`, e o botão ganhou `aria-label`.
+  - Novo botão `#live-panel-mini` dentro do `#live-panel`.
+- `public/app.js`:
+  - `setSidebarCompact(on, remember)` e `initSidebarCompact()`, logo antes de `updateParticipantsUI`. A escolha fica em `localStorage['collab.sidebarCompact']` (`'1'`/`'0'`, com `try/catch`) e é aplicada ao abrir.
+  - O ícone e o rótulo do botão mudam conforme o estado (`aria-expanded`).
+  - `#live-panel-mini` expande a barra.
+  - Em `updateParticipantsUI`, no bloco do botão Assistir/Parar (lógica de assinar sem alteração): o botão ganhou `aria-label` com o nome, a linha ganhou `title`, e um clique na linha chama `watchBtn.click()` **só no modo compacto**.
+- `public/style.css`: bloco "BARRA LATERAL: MODO COMPACTO" no fim.
+  - Na compacta a barra fica com 76 px: só as fotos, com anel vermelho para quem transmite.
+  - Assistir/Parar vira um selo redondo sobre a foto (▶ lilás / ■ cinza).
+  - Compartilhar vira um botão só com o ícone.
+  - O painel "Sua transmissão" vira só o botão `#live-panel-mini`, que reabre a barra.
+  - "AO VIVO", "Em uso" e Parar continuam na barra de cima.
+
+**Sem mudança:** vídeo, áudio, LiveKit, `main.js`. A grade de vídeos só ganha a largura liberada, porque já era `flex: 1`.
+
+**Validação feita (Chrome headless + Playwright, página servida em `http://127.0.0.1` local, `livekit-client` substituído por stub, Electron e publicações simuladas):**
+- Barra começa completa (300 px); o botão compacta para 76 px e grava `'1'`; a grade de vídeos passou a 1204 px.
+- Na compacta:
+  - clicar na foto de quem transmite assinou (`setSubscribed(true)`, sid em `activeSubscribedSids`);
+  - clicar no selo parou;
+  - clicar em quem não transmite não fez nada;
+  - compartilhar pelo ícone funcionou;
+  - ao vivo, só o botão mini aparece no lugar do painel, e Parar continua no topo.
+- Recarregando, a barra voltou compacta. O botão mini expandiu e gravou `'0'`.
+- Nenhum erro de JS. `node --check` OK; CRLF preservado.
+
+**Ainda não testado:** Electron real e sala real.
+
+## Atualização 16/11/2026 — Limpeza das pastas de instaladores antigos (proprietário, com comando preparado pelo Claude)
+
+O proprietário enviou para a Lixeira do Windows, com um comando PowerShell (`Microsoft.VisualBasic.FileIO.FileSystem.DeleteDirectory`, opção `SendToRecycleBin`), as pastas `dist`, `dist2` a `dist13` (builds de 9 a 19/set), `dist-3c` (14/nov) e `dist-linux` (AppImage de 18/out, o único build Linux; pode ser gerado de novo com `npm run build:linux` em Linux).
+
+**Ficaram:** `dist-release` (16/nov, instalador mais recente) e `dist-20261115` (15/nov, instalador validado em live com um amigo). O arquivo `-` da raiz (gravação WAV de ~1,5 min de 9/set, sobra de teste de captura) **foi mantido**. `build/`, `node_modules`, `.env`, `src`, `scripts`, documentos e `D:\Projetos\_backups` não foram tocados. Pasta conferida pelo Claude depois da limpeza. Regra correspondente atualizada no `CLAUDE.md`.
+
+**Observação:** mesmo depois da limpeza, o terminal remoto do Claude no computador do proprietário ainda não iniciou (precisa de até 17 GB livres; o espaço só volta depois de esvaziar a Lixeira).
+
+## Atualização 16/11/2026 — Site no navegador: só assistir (Claude, aprovado pelo proprietário)
+
+**Motivo:** pelo navegador não dá para transmitir, porque a captura de tela e de áudio depende do preload do Electron. Com a interface nova, o cartão "Compartilhar tela" apareceria no site e abriria uma janela vazia.
+
+**Alterações (não commitadas):**
+- `public/app.js`: `IS_DESKTOP_APP = !!(window.electronAPI && window.electronAPI.getSources)`, que põe a classe `is-app` ou `is-browser` em `<html>`.
+- `public/index.html`: a mensagem da tela vazia ganhou duas versões, `.app-only` e `.browser-only` ("Clique em Assistir… Para transmitir, use o app.").
+- `public/style.css`: bloco "NAVEGADOR: SÓ ASSISTIR". Em `.is-browser` ficam escondidos `.share-card`, `#live-panel`, `#live-status`, `#btn-stop` e `.app-only`.
+
+**Validação feita (Chrome headless + Playwright, `file://`, LiveKit em stub):**
+- **Sem `electronAPI`:** classe `is-browser`, cartão de compartilhar escondido (também com a barra compacta), mensagem do navegador visível, botão Assistir visível.
+- **Com `electronAPI` simulado:** classe `is-app` e tudo como antes.
+- Nenhum erro de JS; CRLF preservado.
+
+**Vercel (consultada pelo conector, só leitura):**
+- Projeto `compartilhar-tela-via-site` (`prj_fpeTSZVTwqBObTAmThy7iNHYjaT3`), ligado ao GitHub `Gabriel-Becker989/Compartilhar-tela-via-site`.
+- **Produção atual:** `dpl_JAaPQwcn4Pb3nsJaWohUytFrF5DD`, de 19/09, commit `ff2a980` da `versao-electron`. É o alvo de reversão caso a nova publicação dê problema.
+- Pelo histórico, envios para a `versao-electron` geram pré-visualização, que depois foi promovida.
+- As pré-visualizações têm proteção da Vercel (exigem login do time); o domínio de produção é aberto.
+
+**Próximo passo:** commit (`main.js`, `public/*`, `HANDOFF.md`, `CLAUDE.md`), push, testar a pré-visualização e promover para produção com o ok do proprietário.
