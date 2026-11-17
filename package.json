@@ -1,6 +1,6 @@
 {
   "name": "compartilhar-tela-collab",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "App de Compartilhamento de Tela com Audio de Aplicação (WASAPI Loopback)",
   "main": "main.js",
   "scripts": {
